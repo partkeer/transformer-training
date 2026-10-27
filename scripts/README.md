@@ -44,3 +44,27 @@ PyTorch is pinned in `requirements.txt`. The standard installation used here is
 CPU-only on Windows; a compatible GPU-enabled PyTorch build is a separate setup
 choice. `--pin-memory` requests pinned CPU batches for later GPU transfer; it
 does not move tensors to a GPU or measure performance.
+
+## Training command
+
+`train.py` is the thin entrypoint for the reusable decoder and trainer. The
+[training section in the root README](../README.md#train-the-reference-decoder)
+documents architecture, Linux/CUDA installation, leakage filtering, metrics,
+precision choices and interruption recovery.
+
+```powershell
+# Safe inspection only: no downloads, GPU allocation or optimization.
+.\.venv\Scripts\python.exe scripts\train.py --dry-run
+.\.venv\Scripts\python.exe scripts\train.py --help
+
+# The following commands START training when explicitly run on a configured GPU.
+.\.venv\Scripts\python.exe scripts\train.py --output-dir runs\tinystories-fp32
+.\.venv\Scripts\python.exe scripts\train.py --resume runs\tinystories-fp32\latest.pt
+```
+
+The default is one cleaned TinyStories epoch using a 33.7M-parameter model,
+512-token context, FP32, microbatch size 8 and 8 accumulation steps. Training
+always audits both full source splits and excludes exact validation matches from
+training before optional `--max-stories` sampling. Source loading, audit and
+tokenisation are outside measured training time. Nothing starts merely by
+importing the package; `--dry-run` also bypasses data loading entirely.
