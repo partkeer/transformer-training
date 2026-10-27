@@ -68,3 +68,53 @@ always audits both full source splits and excludes exact validation matches from
 training before optional `--max-stories` sampling. Source loading, audit and
 tokenisation are outside measured training time. Nothing starts merely by
 importing the package; `--dry-run` also bypasses data loading entirely.
+
+## Evaluate checkpoint quality
+
+`evaluate.py` loads a trained `best.pt` or `latest.pt` without starting training.
+It reports token-weighted next-token loss and perplexity and generates example
+story continuations. See the root README's
+[evaluation section](../README.md#evaluate-a-trained-checkpoint) for metric
+interpretation, provenance checks and decoding limits.
+
+```powershell
+# Match the saved validation selection; use the saved device/precision/batch size.
+.\.venv\Scripts\python.exe scripts\evaluate.py --checkpoint runs\my-run\best.pt
+
+# Explicit CPU/FP32 evaluation of a GPU-trained checkpoint.
+.\.venv\Scripts\python.exe scripts\evaluate.py `
+  --checkpoint runs\my-run\best.pt --device cpu --precision fp32 --batch-size 1
+
+# Full validation with two custom story openings; greedy generation.
+.\.venv\Scripts\python.exe scripts\evaluate.py `
+  --checkpoint runs\my-run\best.pt --full-validation `
+  --prompt "Lily found a lost kitten." --prompt "The puppy was afraid." `
+  --temperature 0 --max-new-tokens 100
+
+# Offline, metrics-only evaluation to an explicitly chosen empty directory.
+.\.venv\Scripts\python.exe scripts\evaluate.py `
+  --checkpoint runs\my-run\latest.pt --offline --skip-generation `
+  --output-dir runs\my-run\quality-check
+
+.\.venv\Scripts\python.exe scripts\evaluate.py --help
+```
+
+The default uses the checkpoint's exact validation selection and fingerprints,
+including any source-story sample limit; `--full-validation` removes that limit.
+Only validation data is loaded/preprocessed. Offline execution needs matching
+cached data and tokenizer commits. Worker count defaults to zero and can be
+overridden with `--num-workers`.
+
+Generation defaults to three fixed openings, 128 new tokens, temperature 0.8,
+top-k 50 and seed 42. Repeated `--prompt` flags replace the defaults. `--seed`
+affects generation only, with consecutive per-prompt seeds; temperature zero is
+greedy and top-k zero samples the whole vocabulary. Generation preserves the
+prompt and stops at EOS, the token limit or context capacity. Prompts that fill
+the context are rejected. Use `--skip-generation` for loss/perplexity alone.
+
+Metrics and stories print to the terminal. Atomic `report.json` and `samples.txt`
+files default to `<checkpoint-directory>/evaluations/<UTC-id>/`; `--output-dir`
+must name an empty directory. Existing checkpoints and training logs are left
+unchanged. `best.pt` was selected on validation, so its validation score is not
+an independent final-test result. No trained-model quality results are claimed
+by the synthetic correctness tests.

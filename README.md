@@ -52,8 +52,10 @@ any effect on validation loss or training stability.
 TinyStories exploratory analysis, next-token PyTorch dataloaders, a decoder-only
 transformer, and a single-GPU training command are implemented. Training includes
 full-split exact-overlap exclusion, validation, mixed-precision options, metrics,
-and optimizer-boundary checkpoint recovery. Offline correctness tests and a
-configuration-only dry run are available. **TinyStories training has not been
+and optimizer-boundary checkpoint recovery. A standalone checkpoint-quality
+command measures validation loss/perplexity and generates story continuations.
+Offline correctness tests and a configuration-only dry run are available.
+**TinyStories training has not been
 started**, and no GPU memory, throughput, convergence or generation-quality
 results are claimed. Profiling experiments and the custom kernel remain planned.
 
@@ -455,7 +457,7 @@ failure handling, and interrupted-versus-uninterrupted continuation with dropout
 and worker prefetch. A subprocess test proves dry-run does not import datasets or
 create a run directory. CUDA precision tests skip explicitly when no GPU exists.
 
-Local implementation verification used Python 3.14.7 and PyTorch 2.14.1+cpu:
+Original training implementation verification used Python 3.14.7 and PyTorch 2.14.1+cpu:
 32 tests ran, with 31 passing and one CUDA test explicitly skipped. The default
 dry run reported 33,691,776 parameters and a 64-window effective batch. Dependency
 validation (`pip check`) and Git whitespace checks passed.
@@ -465,3 +467,136 @@ started TinyStories training, measured cloud GPU performance/memory, established
 convergence or checked generated-story quality. SDPA/fused attention, compilation,
 packing, distributed training, activation checkpointing and custom kernels remain
 future profiling-led experiments.
+
+## Evaluate a trained checkpoint
+
+After training, use `scripts/evaluate.py` with either `best.pt` (selected by
+validation loss) or `latest.pt` (most recent saved training boundary):
+
+```powershell
+# Match the saved validation selection and generate three default story samples.
+.\.venv\Scripts\python.exe scripts\evaluate.py --checkpoint runs\my-run\best.pt
+
+# Evaluate a GPU-trained checkpoint on a CPU-only machine.
+# Device and precision overrides must both be explicit when needed.
+.\.venv\Scripts\python.exe scripts\evaluate.py `
+  --checkpoint runs\my-run\best.pt --device cpu --precision fp32 --batch-size 1
+
+# Evaluate every usable official validation story, with a custom opening.
+.\.venv\Scripts\python.exe scripts\evaluate.py `
+  --checkpoint runs\my-run\best.pt --full-validation `
+  --prompt "Lily found a lost kitten."
+
+# Cached-only quantitative evaluation; no story generation.
+.\.venv\Scripts\python.exe scripts\evaluate.py `
+  --checkpoint runs\my-run\latest.pt --offline --skip-generation
+
+# Replace default openings with two custom prompts and use greedy decoding.
+.\.venv\Scripts\python.exe scripts\evaluate.py `
+  --checkpoint runs\my-run\best.pt --prompt "Once upon a time" `
+  --prompt "The puppy was lost." --temperature 0 --max-new-tokens 100
+```
+
+The command restores the checkpoint's architecture and weights without creating
+an optimizer, restoring training RNG state, or modifying training artifacts.
+Device, precision and microbatch size default to saved values; worker count
+defaults to zero. Override these with `--device`, `--precision`, `--batch-size`
+and `--num-workers`. Unsupported CUDA/precision requests fail before data
+downloads, with no automatic CPU or precision fallback.
+
+### Validation selection and metrics
+
+Evaluation loads **only the official validation split** and the checkpoint's
+pinned tokenizer. It does not load, audit, or tokenize the training split.
+Prepared validation data is reused directly. On a fresh cache, only validation
+files are prepared under the datasets cache's `validation-only/` directory;
+the normal training cache remains complete and separate.
+The checkpoint retains the overlap-exclusion policy applied during training.
+Dataset/tokenizer commits, context length, vocabulary, EOS and padding rules are
+fixed by the checkpoint and checked against loaded metadata.
+
+By default the command reproduces the saved validation selection, including
+`--max-stories` sampling from a small training run. It uses the saved validation
+selection seed and rejects changed provenance or fingerprints. `--seed` controls
+generation only. `--full-validation` removes the story limit and clearly labels
+the resulting report; its score may differ because it evaluates more data.
+Sampling limits source rows before blank stories are skipped, and a long story
+may produce several windows. The report records selected source rows, windows,
+and supervised tokens separately.
+
+The objective is identical to training validation: append EOS to each story,
+preserve per-story windows, and compare logits with the loader's already-shifted
+next-token targets. Padding targets are excluded; genuine EOS targets count.
+Partial final batches remain included. Loss is aggregated by valid-token count:
+
+\[
+L = \frac{\sum_b \text{summed cross-entropy}_b}
+          {\sum_b \text{supervised tokens}_b},
+\qquad \mathrm{perplexity} = \exp(L).
+\]
+
+Lower loss/perplexity means better next-token prediction under the same data,
+tokenizer and windowing policy. For example, loss 2 corresponds to perplexity
+about 7.39. Perplexity is not a percentage or an automated story-quality score.
+Compare scores on matching validation selections and record precision/batch-size
+changes, which can affect floating-point reductions. If exponentiation overflows,
+the report keeps the finite loss and writes `perplexity: null` with
+`perplexity_overflow: true`. Empty supervision and nonfinite loss fail explicitly.
+
+The validation split used to select `best.pt` is a **model-selection set**, not an
+independent final test set. These measurements alone do not establish performance
+on a new domain or general language-model benchmarks.
+
+### Generated examples and artifacts
+
+The default prompts are "Once upon a time, a little girl", "Tom found a small box
+in the garden." and "The puppy was afraid of the rain." Repeated `--prompt` flags
+replace that list; `--skip-generation` disables generation entirely. Defaults are
+128 new tokens, temperature 0.8, top-k 50 and seed 42. Temperature zero selects
+greedy decoding; top-k zero enables full-vocabulary sampling. Positive top-k is
+capped at the vocabulary size. Each prompt uses an isolated generator with
+`seed + prompt_index` (zero-based); identical settings are reproducible within
+the same hardware/software/precision environment, without consuming global RNG
+state during generation.
+
+Prompts are never truncated. Blank prompts and prompts filling or exceeding the
+learned context are rejected. Generation stops at EOS, the new-token limit, or
+context capacity, without rolling the context or resetting learned positions.
+The stop reason and token count are recorded. A generated EOS counts as a token
+but is omitted from decoded text; immediate EOS can therefore produce an empty
+continuation. Generated examples are for human inspection of coherence,
+repetition and adherence to the opening, without a numerical quality grade.
+
+Outputs go to `<checkpoint-directory>/evaluations/<UTC-id>/` by default; use
+`--output-dir <path>` for another empty directory. Nonempty destinations are
+rejected. Metrics and stories print to the terminal, and two UTF-8 artifacts are
+written atomically:
+
+- `report.json`: checkpoint path/update count, architecture, effective evaluation
+  settings, validation provenance, hardware/software environment, loss/perplexity,
+  prompts, decoding settings, seeds and generated samples.
+- `samples.txt`: readable prompts, continuation-only and complete decoded text,
+  generated token counts and stopping reasons (or a skipped-generation note).
+
+The reusable interfaces are `quality.evaluate_checkpoint()`,
+`generation.generate()`, and `data.load_tinystories_validation()` in
+`transformer_training`. For direct API use, configure `HF_HOME` and offline
+environment variables before the first Hugging Face import. The script sets
+the default cache to the repository's `.cache/huggingface`; `--offline` requires
+the pinned validation data and tokenizer to have been cached already.
+
+Evaluation correctness tests use artificial stories, a small local tokenizer,
+and synthetic checkpoints, including a subprocess CLI check with local Hub
+stubs. They verify loss/perplexity, validation-selection equivalence, strict
+checkpoint loading, generation and report behavior. A real Parquet-builder test
+uses an unreadable training file to verify that fresh evaluation preparation
+does not read training data. They do not establish
+TinyStories model quality or cloud GPU performance. Inference speed and memory
+benchmarking remain separate work.
+
+Local verification after adding evaluation ran 48 tests: 46 passed and two CUDA
+tests were explicitly skipped on CPU-only PyTorch 2.14.1. Full and sampled
+synthetic data signatures matched a pre-refactor snapshot exactly. An offline
+cache smoke check opened the official 21,990-row validation split and mapped
+only its validation Arrow file; it did not evaluate a trained model. Git and
+new-file whitespace checks passed.
