@@ -29,6 +29,12 @@ def atomic_json(path, value):
     _atomic_write(path, lambda stream: stream.write(encoded))
 
 
+def atomic_text(path, value):
+    """Atomically replace a UTF-8 text artifact."""
+    encoded = value.encode("utf-8")
+    _atomic_write(path, lambda stream: stream.write(encoded))
+
+
 def save_checkpoint(path, payload):
     _atomic_write(path, lambda stream: torch.save(payload, stream))
 
