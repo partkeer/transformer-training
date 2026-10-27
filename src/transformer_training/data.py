@@ -18,6 +18,8 @@ from tokenizers import Tokenizer
 import torch
 from torch.utils.data import DataLoader
 
+from .audit import audit_overlap
+
 DATASET = "roneneldan/TinyStories"
 # Match the existing EDA; the tokenizer is also pinned to an immutable Hub commit.
 DATASET_REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
@@ -53,12 +55,15 @@ def tokenise_stories(batch, indices, *, tokenizer, sequence_length, eos_id,
                      source_indices=None):
     """A batched Arrow map: skip blank text, reject invalid schema, keep tails."""
     texts, source_rows = [], []
-    for text, index in zip(batch["text"], indices):
+    for position, (text, index) in enumerate(zip(batch["text"], indices)):
         if not isinstance(text, str):
             raise ValueError(f"Expected string text at source row {index}")
         if text.strip():
             texts.append(text)
-            source_rows.append(index if source_indices is None else source_indices[index])
+            if "_source_row" in batch:
+                source_rows.append(batch["_source_row"][position])
+            else:
+                source_rows.append(index if source_indices is None else source_indices[index])
     windows, rows = [], []
     for encoding, index in zip(
         tokenizer.encode_batch(texts, add_special_tokens=False), source_rows
@@ -101,6 +106,14 @@ class TinyStoriesLoaders:
     metadata: dict
 
 
+def _exclude_audited_rows(batch, indices, *, excluded):
+    keep = [position for position, row in enumerate(indices) if row not in excluded]
+    result = {name: [values[position] for position in keep]
+              for name, values in batch.items()}
+    result["_source_row"] = [indices[position] for position in keep]
+    return result
+
+
 def create_dataloaders(
     splits: DatasetDict,
     tokenizer: Tokenizer,
@@ -111,13 +124,16 @@ def create_dataloaders(
     num_workers: int = 0,
     pin_memory: bool = False,
     max_stories: int | None = None,
+    exclude_validation_overlap: bool = False,
+    audit_cache_dir: str | Path | None = None,
 ) -> TinyStoriesLoaders:
     """Prepare Arrow-cached windows and loaders; max_stories samples each split.
 
     Training windows shuffle each epoch using a dedicated seeded generator.
     Validation order is fixed. Partial batches are kept in both splits. Data and
-    collation stay on CPU, including when pin_memory=True. No deduplication is
-    performed: preserving official split membership is not a leakage audit.
+    collation stay on CPU, including when pin_memory=True. By default no audit or
+    deduplication is performed. Opt-in exclusion audits full splits before sampling
+    and removes exact validation matches from training, preserving source IDs.
     """
     if sequence_length < 1 or batch_size < 1 or num_workers < 0:
         raise ValueError("sequence_length/batch_size must be positive; num_workers >= 0")
@@ -132,18 +148,28 @@ def create_dataloaders(
     tokenizer = Tokenizer.from_str(tokenizer.to_str())
     tokenizer.no_padding()
     tokenizer.no_truncation()
+    audit = audit_overlap(splits, audit_cache_dir) if exclude_validation_overlap else None
     loaders, split_metadata = {}, {}
     for offset, name in enumerate(("train", "validation")):
         split = splits[name]
         if "text" not in split.column_names:
             raise ValueError(f"{name} has no text column")
         original_rows = len(split)
+        if name == "train" and audit is not None and audit["removed_train_rows"]:
+            split = split.map(
+                _exclude_audited_rows, batched=True, with_indices=True,
+                fn_kwargs={"excluded": frozenset(audit["removed_train_rows"])},
+                desc="Exclude exact validation matches from training",
+            )
+        eligible_rows = len(split)
         # Sort sampled indices to preserve original story order within the subset.
         indices = None
         if max_stories is not None and max_stories < len(split):
             indices = sorted(random.Random(seed + offset).sample(
                 range(len(split)), max_stories))
             split = split.select(indices)
+            if "_source_row" in split.column_names:
+                indices = list(split["_source_row"])
         windows = split.map(
             tokenise_stories, batched=True, with_indices=True, batch_size=1000,
             fn_kwargs={"tokenizer": tokenizer, "sequence_length": sequence_length,
@@ -162,7 +188,8 @@ def create_dataloaders(
             num_workers=num_workers, pin_memory=pin_memory, drop_last=False,
         )
         split_metadata[name] = {
-            "original_stories": original_rows, "selected_stories": len(split),
+            "original_stories": original_rows, "eligible_stories": eligible_rows,
+            "selected_stories": len(split),
             "windows": len(windows), "source_fingerprint": split._fingerprint,
             "windows_fingerprint": windows._fingerprint,
             "selection_seed": seed + offset, "selected_row_indices": indices,
@@ -171,12 +198,17 @@ def create_dataloaders(
         "sequence_length": sequence_length, "batch_size": batch_size,
         "seed": seed, "num_workers": num_workers, "pin_memory": pin_memory,
         "max_stories": max_stories, "drop_last": False,
+        "exclude_validation_overlap": exclude_validation_overlap,
         "vocab_size": tokenizer.get_vocab_size(), "eos_id": eos_id, "pad_id": eos_id,
         "ignore_index": IGNORE_INDEX,
         "policy": "Per-story windows; append EOS; retain tails; skip blank text; "
                   "reject non-string text; no deduplication; train-only shuffle",
         "splits": split_metadata,
     }
+    if audit is not None:
+        metadata["audit"] = audit
+        metadata["policy"] = metadata["policy"].replace(
+            "no deduplication", "exclude exact validation text from training only")
     return TinyStoriesLoaders(loaders["train"], loaders["validation"], metadata)
 
 
@@ -199,6 +231,10 @@ def load_tinystories(
     tokenizer = Tokenizer.from_file(tokenizer_path)
     splits = load_dataset(DATASET, revision=revision)
     _check_dataset_revision(splits, revision)
+    if loader_options.get("exclude_validation_overlap"):
+        from huggingface_hub.constants import HF_HOME
+
+        loader_options.setdefault("audit_cache_dir", Path(HF_HOME) / "training_audits")
     result = create_dataloaders(splits, tokenizer, **loader_options)
     result.metadata.update(
         dataset=DATASET, revision=revision, tokenizer=TOKENIZER,
