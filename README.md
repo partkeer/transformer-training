@@ -431,7 +431,9 @@ every 500 successful updates and at completion.
 Resume inherits the checkpoint configuration and data selection. Only worker
 count and logging/evaluation/checkpoint intervals may change explicitly; model,
 optimization, precision, device, duration and data identity must match. Changed
-fingerprints or preprocessing policy are rejected. Recovery is checked exactly on
+fingerprints or preprocessing policy are rejected. Training options require their
+full names (for example, `--batch-size`); abbreviated flags are rejected so resume
+overrides cannot be silently ignored. Recovery is checked exactly on
 CPU synthetic tests, including dropout and switching between zero and two workers.
 Bitwise equality across hardware, library versions or CUDA kernels is not promised.
 Persist both cache and run directories before terminating a rented instance.

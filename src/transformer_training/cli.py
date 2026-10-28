@@ -15,6 +15,7 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description="Train a small TinyStories decoder on one GPU.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
     )
     for cls in (ModelConfig, TrainingConfig):
         defaults = cls()

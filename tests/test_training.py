@@ -1,6 +1,6 @@
 """Synthetic optimizer tests only. Never downloads or optimizes TinyStories."""
 
-from contextlib import nullcontext, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import asdict, replace
 import io
 import json
@@ -248,7 +248,8 @@ class TrainingTests(unittest.TestCase):
             partial = Trainer(self.model_config, self.config, data(), output)
             partial.fit(stop_after_updates=1)
             with patch("transformer_training.data.load_tinystories", return_value=data()) as load:
-                self.assertEqual(main(["--resume", str(output / "latest.pt")]), 0)
+                self.assertEqual(main(["--resume", str(output / "latest.pt"),
+                                       "--log-every=1"]), 0)
             options = load.call_args.kwargs
             self.assertEqual(options["revision"], "dataset-sha")
             self.assertEqual(options["tokenizer_revision"], "tokenizer-sha")
@@ -256,6 +257,20 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(options["sequence_length"], 4)
             self.assertTrue(options["exclude_validation_overlap"])
             self.assertEqual(load_checkpoint(output / "latest.pt")["state"]["updates"], 6)
+            self.assertEqual(load_checkpoint(output / "latest.pt")["training_config"]["log_every"], 1)
+
+    def test_cli_rejects_abbreviations_before_loading_checkpoint_or_data(self):
+        from transformer_training.cli import main
+
+        for option in (["--batch-s", "3"], ["--learning-r=0.01"]):
+            with self.subTest(option=option), redirect_stderr(io.StringIO()), \
+                    patch("transformer_training.checkpoint.load_checkpoint") as checkpoint, \
+                    patch("transformer_training.data.load_tinystories") as data:
+                with self.assertRaises(SystemExit) as error:
+                    main(["--resume", "unused.pt", *option])
+                self.assertEqual(error.exception.code, 2)
+                checkpoint.assert_not_called()
+                data.assert_not_called()
 
     def test_nonfinite_loss_stops_before_update_and_validation_restores_mode(self):
         model = DecoderOnlyTransformer(self.model_config)
