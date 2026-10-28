@@ -50,6 +50,25 @@ def validate_resume_settings(payload, model_config, config):
         raise ValueError("Incompatible model/training settings for resume")
 
 
+def clip_gradients(parameters, max_norm, *, allow_nonfinite_gradients=False):
+    """Clip finite gradients; leave AMP overflow untouched for GradScaler to skip.
+
+    A nonfinite norm with finite gradient elements is a separate reduction
+    overflow. Abort before clipping can zero those gradients or step the optimizer.
+    """
+    parameters = list(parameters)
+    gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    total_norm = torch.nn.utils.get_total_norm(gradients)
+    if not torch.isfinite(total_norm):
+        if allow_nonfinite_gradients and any(
+            not torch.isfinite(gradient).all() for gradient in gradients
+        ):
+            return total_norm
+        raise FloatingPointError("Nonfinite gradient norm; stopping before optimizer update")
+    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm)
+    return total_norm
+
+
 def validate_device(config):
     device = torch.device(config.device)
     if device.type == "cuda":
@@ -349,9 +368,9 @@ class Trainer:
                 result = accumulate_gradients(self.model, batches, device=self.device,
                                               precision=c.precision, scaler=self.scaler)
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
+                clip_gradients(
                     self.model.parameters(), c.max_grad_norm,
-                    error_if_nonfinite=c.precision != "fp16",
+                    allow_nonfinite_gradients=c.precision == "fp16",
                 )
                 lr = self.optimizer.param_groups[0]["lr"]
                 previous_scale = self.scaler.get_scale()

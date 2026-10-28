@@ -22,7 +22,8 @@ from transformer_training.data import NextTokenCollator, TinyStoriesLoaders
 from transformer_training.evaluation import evaluate, next_token_loss
 from transformer_training.model import DecoderOnlyTransformer
 from transformer_training.training import (CHECKPOINT_VERSION, EpochSampler, Trainer, WarmupCosine,
-                                           accumulate_gradients, make_optimizer, validate_device)
+                                           accumulate_gradients, clip_gradients,
+                                           make_optimizer, validate_device)
 
 
 def synthetic_loaders(batch_size=2, vocab_size=12):
@@ -319,6 +320,70 @@ class TrainingTests(unittest.TestCase):
                     self.assertIn(message, stderr.getvalue())
                     data.assert_not_called()
 
+    def test_gradient_clipping_matches_reference(self):
+        actual = torch.nn.Parameter(torch.ones(2))
+        reference = torch.nn.Parameter(torch.ones(2))
+        actual.grad = torch.tensor([3.0, 4.0])
+        reference.grad = actual.grad.clone()
+        expected_norm = torch.nn.utils.clip_grad_norm_([reference], 1.0)
+        norm = clip_gradients([actual], 1.0, allow_nonfinite_gradients=True)
+        torch.testing.assert_close(norm, expected_norm)
+        torch.testing.assert_close(actual.grad, reference.grad)
+
+    def test_fp16_norm_overflow_aborts_before_optimizer_and_counters(self):
+        # Use a real CPU GradScaler to cover the FP16 update policy without CUDA.
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
+            trainer = Trainer(self.model_config, self.config, synthetic_loaders(),
+                              Path(directory) / "run")
+            trainer.config = replace(self.config, precision="fp16")
+            trainer.scaler = torch.amp.GradScaler("cpu", init_scale=1.0)
+            parameter = next(trainer.model.parameters())
+            before = parameter.detach().clone()
+
+            def extreme_gradients(model, batches, **kwargs):
+                trainer.scaler.scale(parameter.sum() * 1e20).backward()
+                return {"loss_sum": 1.0, "supervised_tokens": 1, "slots": 1, "examples": 1}
+
+            with patch("transformer_training.training.accumulate_gradients",
+                       side_effect=extreme_gradients), \
+                    patch.object(trainer.optimizer, "step") as step:
+                with self.assertRaisesRegex(FloatingPointError, "Nonfinite gradient norm"):
+                    trainer.fit()
+                step.assert_not_called()
+            self.assertTrue(torch.isfinite(parameter.grad).all())
+            self.assertTrue((parameter.grad != 0).all())
+            torch.testing.assert_close(parameter, before, rtol=0, atol=0)
+            self.assertEqual(trainer.state["attempts"], 0)
+            self.assertEqual(trainer.state["updates"], 0)
+            self.assertEqual(trainer.state["consumed_examples"], 0)
+            self.assertEqual(trainer.scheduler.completed_updates, 0)
+
+    def test_amp_nonfinite_gradients_still_skip_and_recover(self):
+        for value in (float("inf"), float("nan")):
+            with self.subTest(value=value):
+                parameter = torch.nn.Parameter(torch.tensor([1.0]))
+                optimizer = torch.optim.AdamW([parameter], lr=0.1, weight_decay=0)
+                scaler = torch.amp.GradScaler("cpu", init_scale=2.0)
+                scaler.scale(parameter.sum() * value).backward()
+                scaler.unscale_(optimizer)
+                norm = clip_gradients([parameter], 1.0, allow_nonfinite_gradients=True)
+                self.assertFalse(torch.isfinite(norm))
+                self.assertFalse(torch.isfinite(parameter.grad).all())
+                scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                self.assertLess(scaler.get_scale(), scale)
+                self.assertEqual(parameter.item(), 1.0)
+                self.assertEqual(len(optimizer.state), 0)
+
+                optimizer.zero_grad(set_to_none=True)
+                scaler.scale(parameter.sum()).backward()
+                scaler.unscale_(optimizer)
+                clip_gradients([parameter], 1.0, allow_nonfinite_gradients=True)
+                scaler.step(optimizer)
+                scaler.update()
+                self.assertLess(parameter.item(), 1.0)
+
     def test_nonfinite_loss_stops_before_update_and_validation_restores_mode(self):
         model = DecoderOnlyTransformer(self.model_config)
         with torch.no_grad():
@@ -390,6 +455,12 @@ class CudaTests(unittest.TestCase):
                 scaler.unscale_(optimizer)
                 self.assertGreater(result["supervised_tokens"], 0)
                 self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters()))
+                clip_gradients(model.parameters(), config.max_grad_norm,
+                               allow_nonfinite_gradients=precision == "fp16")
+                scaler.step(optimizer)
+                scaler.update()
+                self.assertTrue(optimizer.state)
+                self.assertTrue(all(torch.isfinite(p).all() for p in model.parameters()))
 
 
 if __name__ == "__main__":

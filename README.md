@@ -404,6 +404,8 @@ BF16 requires native GPU support; FP16 uses gradient scaling. Nonfinite losses
 abort. FP16 gradient-overflow updates are skipped and logged, and do not advance
 the learning-rate schedule or successful-update counter. Consumed data still
 advances, so an epoch with skipped updates can finish below the schedule horizon.
+If gradient elements are finite but their norm overflows, training aborts before
+clipping or updating parameters instead of counting a zeroed-gradient update.
 Accumulation, scaling and clipping follow the
 [PyTorch AMP guidance](https://docs.pytorch.org/docs/2.14/notes/amp_examples.html).
 Reducing microbatch size changes padding composition and floating-point reduction
