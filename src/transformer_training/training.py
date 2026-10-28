@@ -23,6 +23,33 @@ from .model import DecoderOnlyTransformer
 CHECKPOINT_VERSION = 1
 
 
+def validate_output_directory(output_dir, *, resume=None):
+    """Reject invalid paths before data preparation, without creating anything."""
+    output = Path(output_dir)
+    if output.exists():
+        if not output.is_dir():
+            raise ValueError(f"Output path is not a directory: {output}")
+        if resume is None and any(output.iterdir()):
+            raise ValueError("Output directory is not empty; use a new directory or --resume")
+    for parent in output.parents:
+        if parent.exists():
+            if not parent.is_dir():
+                raise ValueError(f"Output parent is not a directory: {parent}")
+            break
+
+
+def validate_resume_settings(payload, model_config, config):
+    """Check compatibility that does not depend on preparing the dataset."""
+    if payload["version"] != CHECKPOINT_VERSION:
+        raise ValueError("Unsupported checkpoint version")
+    current, saved = asdict(config), payload["training_config"].copy()
+    for key in ("num_workers", "log_every", "eval_every", "checkpoint_every"):
+        current.pop(key)
+        saved.pop(key)
+    if payload["model_config"] != asdict(model_config) or saved != current:
+        raise ValueError("Incompatible model/training settings for resume")
+
+
 def validate_device(config):
     device = torch.device(config.device)
     if device.type == "cuda":
@@ -198,8 +225,7 @@ class Trainer:
         if loaders.train.batch_size != config.batch_size:
             raise ValueError("Training batch size does not match loader")
         self.output_dir = Path(output_dir)
-        if resume is None and self.output_dir.exists() and any(self.output_dir.iterdir()):
-            raise ValueError("Output directory is not empty; use a new directory or --resume")
+        validate_output_directory(self.output_dir, resume=resume)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         seed_everything(config.seed)
         self.model = DecoderOnlyTransformer(model_config).to(self.device)
@@ -234,14 +260,7 @@ class Trainer:
 
     def _restore(self, path):
         payload = load_checkpoint(path)
-        if payload["version"] != CHECKPOINT_VERSION:
-            raise ValueError("Unsupported checkpoint version")
-        current, saved = asdict(self.config), payload["training_config"].copy()
-        for key in ("num_workers", "log_every", "eval_every", "checkpoint_every"):
-            current.pop(key)
-            saved.pop(key)
-        if payload["model_config"] != asdict(self.model_config) or saved != current:
-            raise ValueError("Incompatible model/training settings for resume")
+        validate_resume_settings(payload, self.model_config, self.config)
         if payload["data_signature"] != self.signature:
             raise ValueError("Data fingerprints, revisions or preprocessing policy changed")
         self.model.load_state_dict(payload["model"])

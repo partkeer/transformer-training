@@ -413,7 +413,10 @@ counts vary with story lengths; the script records them explicitly.
 ### Artifacts, recovery and measurements
 
 Default output is `runs/<UTC-id>/`, ignored by Git. A new run refuses a nonempty
-directory. Outputs include `config.json`, `data.json`, `audit.json`,
+directory. Invalid output paths and incompatible resume model/training settings,
+checkpoint versions, sample limits and immutable revisions are rejected before
+data preparation. Symbolic revisions and dataset fingerprints are checked after
+resolution/preprocessing. Outputs include `config.json`, `data.json`, `audit.json`,
 `environment.json`, `metrics.jsonl`, `summary.json`, `latest.pt` and `best.pt`.
 The environment record includes package versions, CUDA/cuDNN build, GPU identity,
 VRAM, compute capability and driver version where available. Config/data records

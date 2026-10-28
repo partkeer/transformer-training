@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from .config import ModelConfig, TrainingConfig
@@ -67,6 +68,10 @@ def main(argv=None):
                     values[field.name] = getattr(args, field.name)
             configs.append(cls(**values))
         model_config, training_config = configs
+        if saved is not None:
+            from .training import validate_resume_settings
+
+            validate_resume_settings(saved, model_config, training_config)
         if args.dry_run:
             from .model import DecoderOnlyTransformer
 
@@ -81,10 +86,13 @@ def main(argv=None):
                 "note": "CPU model construction only; no data access, GPU check or optimizer steps",
             }, indent=2))
             return 0
-        from .training import Trainer, validate_device
+        from .training import Trainer, validate_device, validate_output_directory
 
+        output = args.output_dir or (args.resume.parent if args.resume else
+                                    Path("runs") / datetime.now(timezone.utc).strftime(
+                                        "%Y%m%dT%H%M%S%fZ"))
+        validate_output_directory(output, resume=args.resume)
         validate_device(training_config)  # Fail before downloads if CUDA setup is missing.
-        from .data import load_tinystories
 
         options = {
             "sequence_length": model_config.sequence_length,
@@ -101,11 +109,18 @@ def main(argv=None):
                 options[option] = saved["data_signature"].get(metadata_key)
             elif getattr(args, option) is not None:
                 options[option] = getattr(args, option)
+            if saved is not None:
+                value = options.get(option)
+                # Symbolic Hub revisions still need resolving before comparison.
+                immutable = isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+                if (option == "max_stories" or immutable) and (
+                    value != saved["data_signature"].get(metadata_key)
+                ):
+                    raise ValueError(f"Incompatible data setting for resume: {option}")
+        from .data import load_tinystories
+
         loaders = load_tinystories(**options)
         model_config = replace(model_config, vocab_size=loaders.metadata["vocab_size"])
-        output = args.output_dir or (args.resume.parent if args.resume else
-                                    Path("runs") / datetime.now(timezone.utc).strftime(
-                                        "%Y%m%dT%H%M%S%fZ"))
         trainer = Trainer(model_config, training_config, loaders, output, resume=args.resume)
         trainer.fit()
         return 0

@@ -21,7 +21,7 @@ from transformer_training.config import ModelConfig, TrainingConfig
 from transformer_training.data import NextTokenCollator, TinyStoriesLoaders
 from transformer_training.evaluation import evaluate, next_token_loss
 from transformer_training.model import DecoderOnlyTransformer
-from transformer_training.training import (EpochSampler, Trainer, WarmupCosine,
+from transformer_training.training import (CHECKPOINT_VERSION, EpochSampler, Trainer, WarmupCosine,
                                            accumulate_gradients, make_optimizer, validate_device)
 
 
@@ -271,6 +271,53 @@ class TrainingTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 2)
                 checkpoint.assert_not_called()
                 data.assert_not_called()
+
+    def test_cli_rejects_invalid_output_before_data_preparation(self):
+        from transformer_training.cli import main
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            occupied = root / "occupied"
+            occupied.mkdir()
+            existing = occupied / "existing.txt"
+            existing.write_text("Preserve this file", encoding="utf-8")
+            for output, message in ((occupied, "not empty"), (existing, "not a directory"),
+                                    (existing / "child", "not a directory")):
+                with self.subTest(output=output), redirect_stderr(io.StringIO()) as stderr, \
+                        patch("transformer_training.data.load_tinystories") as data:
+                    with self.assertRaises(SystemExit) as error:
+                        main(["--device", "cpu", "--output-dir", str(output)])
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn(message, stderr.getvalue())
+                    data.assert_not_called()
+            self.assertEqual(existing.read_text(encoding="utf-8"), "Preserve this file")
+
+    def test_cli_rejects_incompatible_resume_before_data_preparation(self):
+        from transformer_training.cli import main
+
+        payload = {"version": CHECKPOINT_VERSION, "model_config": asdict(self.model_config),
+                   "training_config": asdict(self.config),
+                   "data_signature": {"revision": "a" * 40,
+                                      "tokenizer_revision": "b" * 40, "max_stories": 9}}
+        cases = [(["--learning-rate=0.01"], "Incompatible model/training", payload),
+                 (["--batch-size", "3"], "Incompatible model/training", payload),
+                 (["--layers", "3"], "Incompatible model/training", payload),
+                 (["--max-stories", "10"], "Incompatible data setting", payload),
+                 (["--revision", "c" * 40], "Incompatible data setting", payload),
+                 (["--tokenizer-revision", "d" * 40], "Incompatible data setting", payload),
+                 ([], "Unsupported checkpoint version", dict(payload, version=999))]
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "latest.pt"
+            for options, message, saved in cases:
+                save_checkpoint(checkpoint, saved)
+                with self.subTest(options=options, message=message), \
+                        redirect_stderr(io.StringIO()) as stderr, \
+                        patch("transformer_training.data.load_tinystories") as data:
+                    with self.assertRaises(SystemExit) as error:
+                        main(["--resume", str(checkpoint), *options])
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn(message, stderr.getvalue())
+                    data.assert_not_called()
 
     def test_nonfinite_loss_stops_before_update_and_validation_restores_mode(self):
         model = DecoderOnlyTransformer(self.model_config)
