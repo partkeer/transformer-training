@@ -54,10 +54,14 @@ transformer, and a single-GPU training command are implemented. Training include
 full-split exact-overlap exclusion, validation, mixed-precision options, metrics,
 and optimizer-boundary checkpoint recovery. A standalone checkpoint-quality
 command measures validation loss/perplexity and generates story continuations.
-Offline correctness tests and a configuration-only dry run are available.
-**TinyStories training has not been
-started**, and no GPU memory, throughput, convergence or generation-quality
-results are claimed. Profiling experiments and the custom kernel remain planned.
+Offline correctness tests and configuration-only dry runs are available.
+Instrumented training metrics, repeated benchmarks, PyTorch memory/time profiles,
+optional Nsight capture/import, and quality-versus-time reports are implemented.
+See [measurement commands and definitions](docs/measurements.md). These additions
+are verified with synthetic CPU workloads and add no new TinyStories training or
+GPU performance/quality results. Existing supplied baseline artifacts are not
+reanalysed by this change. The custom kernel remains planned and must be selected
+from measured profiling evidence.
 
 ## Load TinyStories and explore the data
 
@@ -433,9 +437,10 @@ accumulation groups, so abrupt interruptions can lose work since the latest save
 boundary. `best.pt` is saved on improved validation loss; `latest.pt` is saved
 every 500 successful updates and at completion.
 
-Resume inherits the checkpoint configuration and data selection. Only worker
-count and logging/evaluation/checkpoint intervals may change explicitly; model,
-optimization, precision, device, duration and data identity must match. Changed
+Resume inherits the checkpoint configuration and data selection. Worker count,
+logging/evaluation/checkpoint intervals, timing warm-up, validation-loss targets,
+and the operational token budget may change explicitly. Model, optimization,
+precision, device, epoch/step schedule horizon and data identity must match. Changed
 fingerprints or preprocessing policy are rejected. Training options require their
 full names (for example, `--batch-size`); abbreviated flags are rejected so resume
 overrides cannot be silently ignored. Recovery is checked exactly on
@@ -446,12 +451,14 @@ Persist both cache and run directories before terminating a rented instance.
 Logs report token-weighted loss, the LR used, supervised tokens, padding
 utilisation, synchronized mean update-attempt time, tokens/second, skipped updates,
 and peak allocated/reserved CUDA bytes (null on CPU). Skipped updates are logged
-immediately. Summary timing excludes the first 10 update attempts; small runs may
+immediately. Summary timing excludes the first 10 attempts per invocation; small runs may
 have no steady-state summary. Timing includes data delivery, transfer and update
 work, while excluding preprocessing, epoch iterator setup, evaluation and
 checkpoint writing. Evaluation and checkpoint durations are recorded separately.
-These are training-loop measurements, not isolated GPU kernel benchmarks; future
-performance comparisons still need repeated controlled measurements.
+These are training-loop measurements. The separate benchmark command supplies
+repeated controlled measurements; the profiler commands capture detailed traces
+independently. New useful-throughput and lifecycle measurements, invocation
+artifacts and quality targets are described in [the measurement guide](docs/measurements.md).
 
 ### Verification limits
 

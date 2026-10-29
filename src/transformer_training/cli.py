@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 
 from .config import ModelConfig, TrainingConfig
 
@@ -24,8 +25,13 @@ def build_parser():
             # Model vocabulary is obtained from the pinned tokenizer, never guessed for training.
             if field.name == "vocab_size":
                 continue
+            if field.name == "validation_loss_targets":
+                parser.add_argument("--validation-loss-target", dest=field.name,
+                                    type=float, action="append", default=[],
+                                    help="Observe first validation loss at/below this target; repeatable")
+                continue
             default = getattr(defaults, field.name)
-            kind = int if field.name == "max_steps" else type(default)
+            kind = int if field.name in {"max_steps", "supervised_token_budget"} else type(default)
             options = {"type": kind, "default": default,
                        "help": field.name.replace("_", " ").capitalize()}
             if field.name == "precision":
@@ -51,6 +57,8 @@ def main(argv=None):
     for argument in (sys.argv[1:] if argv is None else argv):
         if argument.startswith("--"):
             explicit.add(argument.split("=", 1)[0][2:].replace("-", "_"))
+    if "validation_loss_target" in explicit:
+        explicit.add("validation_loss_targets")
     if args.offline:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["HF_DATASETS_OFFLINE"] = "1"
@@ -119,9 +127,12 @@ def main(argv=None):
                     raise ValueError(f"Incompatible data setting for resume: {option}")
         from .data import load_tinystories
 
+        preparation_start = time.perf_counter()
         loaders = load_tinystories(**options)
+        preparation_seconds = time.perf_counter() - preparation_start
         model_config = replace(model_config, vocab_size=loaders.metadata["vocab_size"])
-        trainer = Trainer(model_config, training_config, loaders, output, resume=args.resume)
+        trainer = Trainer(model_config, training_config, loaders, output, resume=args.resume,
+                          preparation_seconds=preparation_seconds)
         trainer.fit()
         return 0
     except (ValueError, RuntimeError, OSError, KeyError, FloatingPointError) as error:

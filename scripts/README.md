@@ -1,5 +1,21 @@
 # TinyStories commands
 
+Training measurement tools are documented in
+[the measurement guide](../docs/measurements.md):
+
+```powershell
+# Inspection only: no data access, CUDA initialization or outputs.
+.\.venv\Scripts\python.exe scripts\benchmark_training.py --dry-run
+.\.venv\Scripts\python.exe scripts\profile_training.py --dry-run --backend all
+
+# These commands execute bounded training updates when explicitly run.
+.\.venv\Scripts\python.exe scripts\benchmark_training.py --checkpoint runs\my-run\latest.pt --output-dir runs\speed
+.\.venv\Scripts\python.exe scripts\profile_training.py --checkpoint runs\my-run\latest.pt --backend all --output-dir runs\profiles
+
+# Read new instrumented training logs and generate quality plots.
+.\.venv\Scripts\python.exe scripts\report_measurements.py --run-dir runs\my-run
+```
+
 Run these PowerShell commands from the repository root using Python 3.14.
 
 ```powershell

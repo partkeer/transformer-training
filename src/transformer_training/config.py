@@ -46,6 +46,8 @@ class TrainingConfig:
     checkpoint_every: int = 500
     log_every: int = 10
     timing_warmup_steps: int = 10
+    supervised_token_budget: int | None = None
+    validation_loss_targets: tuple[float, ...] = ()
 
     def __post_init__(self):
         for name in ("batch_size", "gradient_accumulation_steps", "epochs",
@@ -54,6 +56,11 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be positive")
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError("max_steps must be positive or None")
+        if self.supervised_token_budget is not None and self.supervised_token_budget < 1:
+            raise ValueError("supervised_token_budget must be positive or None")
+        if any(not math.isfinite(x) or x < 0 for x in self.validation_loss_targets):
+            raise ValueError("validation loss targets must be finite and nonnegative")
+        object.__setattr__(self, "validation_loss_targets", tuple(sorted({float(x) for x in self.validation_loss_targets})))
         if self.num_workers < 0 or self.timing_warmup_steps < 0:
             raise ValueError("num_workers and timing_warmup_steps must be nonnegative")
         if self.seed < 0 or self.seed >= 2**63:
