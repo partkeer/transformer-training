@@ -64,6 +64,7 @@ carefully chosen custom GPU kernel.
 - Keep `README.md` concise and centred on clear instructions for running the code:
   installation, prerequisites, runnable commands, essential options, and where to
   find outputs. Include only the context needed to use those commands correctly.
+  Use comments within code cells if they help understanding.
 - Put implementation details in comments or docstrings in the relevant source
   files, maintenance contracts here, and detailed metric/profiler definitions in
   `docs/measurements.md`. Use focused documentation under `docs/` for longer
