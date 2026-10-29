@@ -128,7 +128,9 @@ greedy and top-k zero samples the whole vocabulary. Generation preserves the
 prompt and stops at EOS, the token limit or context capacity. Prompts that fill
 the context are rejected. Use `--skip-generation` for loss/perplexity alone.
 
-Metrics and stories print to the terminal. Atomic `report.json` and `samples.txt`
+Metrics, sample metadata, prompts and continuations print to the terminal without
+the duplicate complete-text section. Saved artifacts retain the complete text.
+Atomic `report.json` and `samples.txt`
 files default to `<checkpoint-directory>/evaluations/<UTC-id>/`; `--output-dir`
 must name an empty directory. Existing checkpoints and training logs are left
 unchanged. `best.pt` was selected on validation, so its validation score is not

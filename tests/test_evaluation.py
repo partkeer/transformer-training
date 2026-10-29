@@ -342,7 +342,12 @@ class CheckpointEvaluationTests(SingleThreadTests):
             self.assertIsNone(load.call_args.kwargs["max_stories"])
             self.assertEqual(report["metrics"]["evaluated_windows"], 4)
             self.assertIn('"perplexity"', stdout.getvalue())
-            self.assertIn("Complete text:", stdout.getvalue())
+            self.assertNotIn("Complete text:", stdout.getvalue())
+            saved_samples = (root / "quality" / "samples.txt").read_text(encoding="utf-8")
+            for sample in report["samples"]:
+                self.assertIn(f"Prompt: {sample['prompt']}\n", stdout.getvalue())
+                self.assertIn(f"Continuation:\n{sample['continuation']}\n", stdout.getvalue())
+                self.assertIn(f"Complete text:\n{sample['text']}", saved_samples)
 
     def test_validation_metadata_rejects_changes(self):
         with tempfile.TemporaryDirectory() as directory:

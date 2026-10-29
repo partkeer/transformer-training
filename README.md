@@ -583,8 +583,9 @@ repetition and adherence to the opening, without a numerical quality grade.
 
 Outputs go to `<checkpoint-directory>/evaluations/<UTC-id>/` by default; use
 `--output-dir <path>` for another empty directory. Nonempty destinations are
-rejected. Metrics and stories print to the terminal, and two UTF-8 artifacts are
-written atomically:
+rejected. Metrics, sample metadata, prompts and continuations print to the
+terminal without repeating the complete text. Two UTF-8 artifacts are written
+atomically:
 
 - `report.json`: checkpoint path/update count, architecture, effective evaluation
   settings, validation provenance, hardware/software environment, loss/perplexity,

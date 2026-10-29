@@ -49,7 +49,7 @@ def main(argv=None):
                           "selection": report["evaluation"]["selection"],
                           **report["metrics"], "output_dir": report["output_dir"]},
                          indent=2, allow_nan=False))
-        print(_samples_text(report["samples"]))
+        print(_samples_text(report["samples"], include_complete_text=False))
         return 0
     except (ValueError, RuntimeError, OSError, KeyError, TypeError, FloatingPointError) as error:
         parser.exit(2, f"error: {error}\n")

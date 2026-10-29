@@ -46,15 +46,15 @@ def verify_validation_metadata(saved, actual, *, full_validation=False):
                          "use the checkpoint's data and preprocessing environment")
 
 
-def _samples_text(samples):
+def _samples_text(samples, *, include_complete_text=True):
     if not samples:
         return "Generation skipped.\n"
     return "\n\n".join(
         f"Sample {index + 1} | seed {sample['seed']} | "
         f"{sample['generated_tokens']} generated tokens | {sample['stop_reason']}\n"
         f"Prompt: {sample['prompt']}\n"
-        f"Continuation:\n{sample['continuation']}\n"
-        f"Complete text:\n{sample['text']}"
+        f"Continuation:\n{sample['continuation']}"
+        + (f"\nComplete text:\n{sample['text']}" if include_complete_text else "")
         for index, sample in enumerate(samples)
     ) + "\n"
 
