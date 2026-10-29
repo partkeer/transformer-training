@@ -61,10 +61,14 @@ carefully chosen custom GPU kernel.
 - Dry runs must avoid data access, downloads, CUDA initialisation, run-directory
   creation, and training updates. Training dry-run may construct the model on CPU;
   diagnostic dry-runs resolve configuration only.
-- Keep the README focused on installation and user commands. Put maintenance
-  contracts here, local implementation explanations beside the code, and detailed
-  metric/profiler definitions in `docs/measurements.md`. Do not duplicate historical
-  verification logs in the README.
+- Keep `README.md` concise and centred on clear instructions for running the code:
+  installation, prerequisites, runnable commands, essential options, and where to
+  find outputs. Include only the context needed to use those commands correctly.
+- Put implementation details in comments or docstrings in the relevant source
+  files, maintenance contracts here, and detailed metric/profiler definitions in
+  `docs/measurements.md`. Use focused documentation under `docs/` for longer
+  explanations and link to it from the README when useful. Keep implementation
+  walkthroughs and historical verification logs out of the README.
 
 ## Verification and experiments
 
@@ -81,15 +85,17 @@ carefully chosen custom GPU kernel.
 - Report correctness and training-stability checks alongside performance results.
   Distinguish source inspection, local tests, GPU measurements, and full training
   runs; never imply that an unperformed check has passed.
-- Update the README when implemented capabilities, execution instructions, or
-  measured results change. Label planned work clearly and do not invent results.
+- Update the README when implemented capabilities or execution instructions
+  change, keeping examples accurate and concise. Record detailed measured results
+  in focused documentation under `docs/` and link from the README when useful.
+  Label planned work clearly and do not invent results.
 
 ## Communication
 
-- Always give detailed, in-depth answers unless the user explicitly requests
+- Always give clear but detailed answers unless the user explicitly requests
   otherwise.
 - Include examples, edge cases, and practical implications where relevant.
-- When appropriate, show formulas, short derivations, or pseudocode.
+- After implementing new features, clearly but concisely explain how the user can run the feature.
 
 ## Git commit messages
 

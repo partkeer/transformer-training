@@ -3,6 +3,10 @@
 Training measurement tools are documented in
 [the measurement guide](../docs/measurements.md):
 
+Use `run_experiments.py --plan experiments/implementations.json --dry-run` to
+inspect the sequential implementation suite. The [root README](../README.md#switch-implementations-and-compare-them)
+documents execution switches, running the suite, reports and resume.
+
 ```powershell
 # Inspection only: no data access, CUDA initialization or outputs.
 .\.venv\Scripts\python.exe scripts\benchmark_training.py --dry-run

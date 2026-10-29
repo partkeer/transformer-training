@@ -1,9 +1,192 @@
 # Training measurements and controlled diagnostics
 
-These commands share the reference training update: masked next-token loss,
-AdamW, accumulation, clipping, AMP policy and schedule. They introduce no model
-optimisation and choose no custom kernel. Offline tests use tiny synthetic data;
+These commands share one training update: masked next-token loss, AdamW,
+accumulation, clipping, AMP policy and schedule. Execution switches select
+reference/SDPA attention, AMP, compilation, AdamW variants and activation
+checkpointing. They choose no custom kernel. Offline tests use tiny synthetic data;
 GPU performance and Nsight interoperability require verification on the GPU host.
+
+## Implementation experiment plans
+
+`scripts/run_experiments.py` accepts version 1 JSON plans. See
+[`experiments/implementations.json`](../experiments/implementations.json) for the
+full example. Configurations are fully resolved and written to
+`resolved-plan.json` before execution. Unknown and duplicate JSON keys, unsafe
+or duplicate IDs, symbolic revisions, undeclared changes and forward/cyclic
+references are rejected. Dry-run resolves settings only: no data imports,
+downloads, CUDA initialisation, model construction, or output directories.
+
+This smaller example isolates one optimiser change and enables optional quality
+training. Its commands perform real updates when executed:
+
+```json
+{
+  "version": 1,
+  "shared": {
+    "model": {},
+    "training": {"epochs": 1},
+    "data": {"max_stories": 1000},
+    "offline": false
+  },
+  "benchmark": {
+    "repeats": 5,
+    "warmup": 10,
+    "measured": 50,
+    "input_mode": "loader",
+    "timeout_seconds": 1800
+  },
+  "quality": {
+    "supervised_token_budget": 100000,
+    "seeds": [42, 43, 44],
+    "degradation_margin": 0.02,
+    "timeout_seconds": 86400
+  },
+  "variants": [
+    {"id": "reference"},
+    {
+      "id": "foreach",
+      "reference": "reference",
+      "implementation": {"optimizer_implementation": "foreach"},
+      "changes": ["implementation.optimizer_implementation"]
+    }
+  ]
+}
+```
+
+Omit `quality` entirely for performance-only experiments. Its presence requires
+an explicit positive token budget and nonempty unique seed list. The degradation
+margin is optional; it is an absolute validation-loss difference in nats/token.
+Per-seed observations within that margin do not establish statistical equivalence.
+Choose enough training data/epochs for the requested budget and enough remaining
+updates for benchmark warm-up plus measurement. A story limit still performs the
+full official overlap audit before sampling.
+
+`shared.model` and `shared.training` accept the existing configuration fields.
+`shared.data` accepts `revision`, `tokenizer_revision`, and `max_stories`; revisions
+default to the package's pinned commits. Every variant starts from shared defaults,
+not from its reference's configuration. Specify its complete intended implementation
+overrides and precision. `reference` must name an earlier variant; `changes` must
+list exactly the differing precision/implementation fields. For example, a BF16
+flash-attention variant should compare with a BF16 reference-attention control.
+Combined configurations are explicit and can name any earlier appropriate control.
+
+### Trial isolation and recovery
+
+Each benchmark repeat starts in a fresh subprocess from the same seeded model,
+data order, scheduler and scaler. Every attempt directory retains its request,
+worker log, raw results, compiler cache and supporting artifacts. Compiler caches
+are isolated for each attempt; remote caches are disabled. Cache directories are
+excluded from completed-artifact checksums; result artifacts and checkpoints are
+included. A process lock prevents concurrent writes to the same suite.
+
+`suite-state.json` records atomic progress. `--resume` checks the resolved plan,
+source contents, environment and SHA-256 manifests of completed jobs before
+reusing them. An incomplete benchmark repeat restarts in a new attempt directory.
+An incomplete quality job resumes its normal training checkpoint when available;
+without a checkpoint it starts a fresh attempt. Output from older attempts is
+preserved. Environment/source/plan changes require a new suite and fresh baseline.
+Use a Git-ignored output directory such as `runs/implementations`, or a directory
+outside the checkout, so artifacts cannot change the measured source identity.
+
+### Comparison conditions and metrics
+
+Comparisons require matching architecture, training/data configuration, initial
+checkpoint content (where applicable), schedule horizon, starting counters,
+hardware/software/source identity, input mode, repeat count, warm-up and measured
+attempt counts. Only declared precision/implementation differences are permitted.
+The existing `--compare` option accepts repeatable `--allow-change` field paths;
+unexpected differences are listed and suppress speedup claims.
+
+For example, compare SDPA math with reference attention at the same FP32 settings:
+
+```bash
+python scripts/benchmark_training.py --output-dir runs/reference-speed
+python scripts/benchmark_training.py --attention sdpa --sdpa-backend math --compare runs/reference-speed/report.json --allow-change implementation.attention --allow-change implementation.sdpa_backend --output-dir runs/sdpa-speed
+```
+
+The comparison reports requested settings separately from observed backend
+evidence. Unsupported variants retain their failure reasons while independent
+suite jobs continue. The suite returns nonzero for incomplete results or
+ineligible warmed timing. CPU checks do not establish GPU compatibility,
+speedups, or memory savings; measure those on the target GPU host.
+
+Fixed input mode reuses a CPU accumulation group and still includes transfers.
+Loader mode includes loader delivery. Neither includes validation or checkpoint
+I/O in update timings. Profiler captures are excluded from performance comparisons.
+
+The suite table includes median useful/processed tokens per second, variation
+across repeats, median/p95 update time, peak allocated/reserved bytes, skipped
+updates and numerical failures. Latency distributions pool raw attempts; throughput
+variation is computed across independent repeats. Memory reduction uses the median
+peak allocated memory, and checkpointing overhead uses median update time:
+
+```text
+speedup = candidate useful tokens/s / reference useful tokens/s
+memory reduction = 1 - candidate peak allocated / reference peak allocated
+update time change (%) = 100 * (candidate median time / reference median time - 1)
+```
+
+Missing memory, throughput or quality is unavailable, never a synthetic zero.
+Failed/unsupported entries preserve their reasons and independent jobs continue.
+The suite exits nonzero for incomplete jobs, unmet quality budgets or ineligible
+warmed comparisons. Raw contaminated timings remain inspectable.
+
+### Attention semantics and backend evidence
+
+The public model validates nonempty right-padded masks. With that contract,
+`is_causal=True` prevents every valid query from seeing padding; SDPA need not
+allocate an explicit padding/causal mask. Padded-query logits are finite but
+unspecified and excluded by ignored targets. This shortcut does not support left
+padding or arbitrary masks; such inputs still fail validation. SDPA attention
+dropout uses the configured probability in training and zero in evaluation.
+Different attention kernels need not consume identical dropout RNG sequences.
+
+An explicit backend enables only that backend, including checkpoint recomputation.
+Unsupported device/dtype/shape/dropout combinations fail without backend fallback.
+`auto` permits PyTorch dispatch. Reports retain the requested backend and separately
+capture observed operators for every encountered batch/sequence shape after timed
+measurement. Capture runs forward/backward for training and forward-only for
+evaluation; it performs no optimiser update and restores gradients, mode and RNG.
+Peak queries and sampling stop before diagnostic captures. Compiled generated
+operators are labelled as generated implementations; they are not guessed to be a
+fused SDPA backend. Unresolved evidence is unverified and suppresses backend-specific
+comparisons. Numerical values can differ within dtype-appropriate tolerances.
+
+External Nsight workers do not start a second CUDA profiler, which could conflict
+with Nsight's ownership of CUPTI. Use a separate PyTorch capture or benchmark's
+untimed evidence pass to identify SDPA dispatch for those configurations.
+
+### Compilation accounting
+
+Only the internal tensor computation is compiled with Inductor and `fullgraph=True`.
+Public input validation stays eager and remains included in update timing. Graph
+breaks/compiler failures raise errors; no eager retry is made. Checkpoint weights
+retain their ordinary names, independently of compilation wrappers. Train/eval
+mode and partial final shapes can trigger new specialisations.
+
+Reports retain wrapper setup time, compiler-event telemetry, first complete
+forward/backward-attempt latency, warm-up records and warmed timings. The first
+attempt includes data delivery, execution and potentially compilation: it is not
+pure compilation time. Compiler-event durations can overlap and their coverage
+depends on the pinned PyTorch diagnostic API; inspect raw events before summing
+them. Worker logs include graph-break and recompilation diagnostics. If compilation
+occurs during measured attempts, the warmed result is marked ineligible; increasing
+warm-up alone cannot guarantee coverage of a later partial-batch shape. Missing
+compiler telemetry also prevents compiled warmed speedup claims.
+
+### Quality protocol
+
+Each variant uses the same initial seed, data order, schedule horizon and processed
+token budget as its named control. Stopping occurs at accumulation boundaries;
+actual processed/applied totals and overshoot are retained. Skipped FP16 attempts
+consume processed tokens but do not advance the successful-update scheduler.
+
+Quality evaluation loads `latest.pt` at the budget endpoint through the shared
+evaluator. It uses FP32, eager reference attention and full validation, with no
+generation, so validation membership does not depend on the training seed. Reports
+give paired loss differences per seed and flag mismatched processed/applied work,
+skips, validation identity differences and unreached budgets. Evaluation does not
+restore training RNG or change its source checkpoint.
 
 ## Routine training
 
