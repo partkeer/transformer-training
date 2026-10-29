@@ -125,8 +125,13 @@ for plan configuration and optional quality runs.
 These diagnostics perform real training updates and need fresh output directories:
 
 ```bash
+# Benchmark warmed training updates: tokens/s, update time, and peak GPU memory.
 python scripts/benchmark_training.py --output-dir runs/benchmark
+
+# Profile CPU/GPU activity and training phases to locate bottlenecks.
 python scripts/profile_training.py --backend pytorch --output-dir runs/profile-timeline
+
+# Capture memory usage over time and break it down by tensor category.
 python scripts/profile_training.py --backend memory --output-dir runs/profile-memory
 ```
 
