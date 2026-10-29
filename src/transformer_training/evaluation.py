@@ -27,6 +27,10 @@ def next_token_loss(logits, labels):
 
 @torch.no_grad()
 def evaluate(model, loader, *, device="cpu", precision="fp32"):
+    """Divide summed token loss by all nonignored targets, including real EOS.
+
+    Averaging batch means would overweight short or heavily padded batches.
+    """
     was_training = model.training
     model.eval()
     total_loss = torch.zeros((), dtype=torch.float64, device=device)

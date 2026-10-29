@@ -30,6 +30,42 @@ carefully chosen custom GPU kernel.
 - Avoid unrelated infrastructure or features that obscure the training and
   optimisation work.
 
+## Implementation contracts
+
+- Keep runnable scripts thin; put reusable behaviour in `src/transformer_training/`.
+  Training and standalone checkpoint evaluation must share the validation code.
+- Labels are already shifted next-token targets. Do not shift them again.
+  `attention_mask` marks padding; the model must separately enforce causality.
+  Preserve per-story windows, chunk-boundary target coverage, genuine EOS targets,
+  ignored padding targets (`-100`), and partial final batches.
+- Weight training accumulation and validation by the total supervised-token
+  count, not by the number of batches or microbatches. Sum token losses before
+  dividing so short or heavily padded batches do not receive excess weight.
+- Training audits both full official splits before optional sampling. Hash
+  unchanged UTF-8 text and exclude only exact validation matches from training;
+  preserve validation membership and original source-row identity. Skip blank
+  stories, reject non-string text, and do not introduce normalisation or
+  near-duplicate removal. Keep dataset/tokenizer revisions pinned and reject
+  mismatched offline caches.
+- Checkpoints save model, optimiser, scheduler, scaler, RNG, epoch, consumed
+  example cursor, and data identity at accumulation boundaries. Resume must
+  inherit saved settings, reject incompatible model/training/data changes, and
+  restart the deterministic sample order at the consumed cursor, independently
+  of worker prefetch. Preserve the explicit operational overrides allowed by
+  `validate_resume_settings`; do not silently fall back or promise bitwise
+  recovery across different hardware or library versions.
+- Standalone evaluation prepares validation data only and reproduces the saved
+  validation selection, seed, revisions, and fingerprints. `--full-validation`
+  explicitly changes the selection; the generation seed must not change it.
+  Evaluation must not modify training artifacts or restore training RNG state.
+- Dry runs must avoid data access, downloads, CUDA initialisation, run-directory
+  creation, and training updates. Training dry-run may construct the model on CPU;
+  diagnostic dry-runs resolve configuration only.
+- Keep the README focused on installation and user commands. Put maintenance
+  contracts here, local implementation explanations beside the code, and detailed
+  metric/profiler definitions in `docs/measurements.md`. Do not duplicate historical
+  verification logs in the README.
+
 ## Verification and experiments
 
 - Run checks appropriate to each change. For training logic, verify causal

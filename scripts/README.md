@@ -64,9 +64,10 @@ does not move tensors to a GPU or measure performance.
 ## Training command
 
 `train.py` is the thin entrypoint for the reusable decoder and trainer. The
-[training section in the root README](../README.md#train-the-reference-decoder)
-documents architecture, Linux/CUDA installation, leakage filtering, metrics,
-precision choices and interruption recovery.
+[root README](../README.md#setup) covers Linux/CUDA installation; its
+[training section](../README.md#train-and-resume) covers defaults, starting runs,
+output files and interruption recovery. Detailed metrics and profiling commands
+are in the [measurement guide](../docs/measurements.md).
 
 ```powershell
 # Safe inspection only: no downloads, GPU allocation or optimization.
@@ -97,8 +98,9 @@ is not a measured training speedup; GPU performance and quality remain unmeasure
 `evaluate.py` loads a trained `best.pt` or `latest.pt` without starting training.
 It reports token-weighted next-token loss and perplexity and generates example
 story continuations. See the root README's
-[evaluation section](../README.md#evaluate-a-trained-checkpoint) for metric
-interpretation, provenance checks and decoding limits.
+[evaluation section](../README.md#evaluate-a-checkpoint) for common commands,
+metric interpretation and output locations. Selection and decoding details
+are below.
 
 ```powershell
 # Match the saved validation selection; use the saved device/precision/batch size.

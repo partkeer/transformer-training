@@ -69,6 +69,8 @@ def tokenise_stories(batch, indices, *, tokenizer, sequence_length, eos_id,
         tokenizer.encode_batch(texts, add_special_tokens=False), source_rows
     ):
         tokens = encoding.ids + [eos_id]
+        # The extra token supplies the final target; stride keeps every pair
+        # exactly once. Attention context resets at each window, including tails.
         for start in range(0, len(tokens) - 1, sequence_length):
             windows.append(tokens[start:start + sequence_length + 1])
             rows.append(index)
