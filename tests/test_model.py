@@ -32,7 +32,11 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(ModelConfig(**json.loads(json.dumps(asdict(self.config)))), self.config)
         with torch.device("meta"):
             default = DecoderOnlyTransformer(ModelConfig())
-        self.assertEqual(sum(p.numel() for p in default.parameters()), 33691776)
+        self.assertEqual(asdict(default.config), {
+            "vocab_size": 50257, "sequence_length": 512, "layers": 6,
+            "d_model": 160, "heads": 4, "d_ff": 640, "dropout": 0.1,
+        })
+        self.assertEqual(sum(p.numel() for p in default.parameters()), 9979040)
         for module in self.model.modules():
             if isinstance(module, nn.Linear) and module.bias is not None:
                 self.assertTrue((module.bias == 0).all())
@@ -69,8 +73,34 @@ class ModelTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(parameter.grad).all())
         self.assertGreater(self.model.blocks[0].attention.qkv.weight.grad.abs().sum(), 0)
 
+    def test_default_architecture_forward_backward_and_masking(self):
+        model = DecoderOnlyTransformer(ModelConfig())
+        self.assertIs(model.token_embedding.weight, model.lm_head.weight)
+        ids = torch.tensor([[2, 3, 4, 5], [6, 7, 1, 1]])
+        labels = torch.tensor([[3, 4, 5, 1], [7, 1, -100, -100]])
+        mask = labels != -100
+        changed = ids.clone()
+        changed[:, 2:] = torch.tensor([[8, 9], [10, 11]])
+        model.eval()
+        with torch.no_grad():
+            logits = model(ids, mask)
+            self.assertEqual(logits.shape, (2, 4, 50257))
+            self.assertTrue(torch.isfinite(logits).all())
+            torch.testing.assert_close(logits[:, :2], model(changed, mask)[:, :2],
+                                       rtol=0, atol=0)
+            torch.testing.assert_close(logits[:, :2], model(ids[:, :2]),
+                                       rtol=1e-5, atol=1e-6)
+        model.train()
+        loss = next_token_loss(model(ids, mask), labels) / mask.sum()
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+        for parameter in model.parameters():
+            self.assertIsNotNone(parameter.grad)
+            self.assertTrue(torch.isfinite(parameter.grad).all())
+        self.assertGreater(model.blocks[0].attention.qkv.weight.grad.abs().sum(), 0)
+
     def test_invalid_configurations_and_inputs(self):
-        for options in ({"heads": 5}, {"layers": 0}, {"dropout": 1},
+        for options in ({"heads": 3}, {"layers": 0}, {"dropout": 1},
                         {"dropout": float("nan")}, {"d_ff": -1}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 ModelConfig(**options)

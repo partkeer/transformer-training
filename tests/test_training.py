@@ -223,17 +223,57 @@ class TrainingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "not-created"
             code = (
-                "import sys; from transformer_training.cli import main; "
-                f"main(['--dry-run', '--output-dir', {str(output)!r}]); "
-                "assert 'transformer_training.data' not in sys.modules; "
-                "assert 'datasets' not in sys.modules"
+                "import sys\n"
+                "from unittest.mock import patch\n"
+                "from transformer_training.cli import main\n"
+                "with patch('torch.cuda.is_available', side_effect=AssertionError('GPU check')), "
+                "patch('torch.cuda._lazy_init', side_effect=AssertionError('CUDA init')), "
+                "patch('torch.optim.AdamW', side_effect=AssertionError('optimizer')), "
+                "patch('torch.Tensor.backward', side_effect=AssertionError('backward')):\n"
+                f"    assert main(['--dry-run', '--output-dir', {str(output)!r}]) == 0\n"
+                "assert 'transformer_training.data' not in sys.modules\n"
+                "assert 'datasets' not in sys.modules\n"
             )
             result = subprocess.run([sys.executable, "-c", code], cwd=root, text=True,
                                     capture_output=True, check=True, timeout=60)
             payload = json.loads(result.stdout)
-            self.assertEqual(payload["parameters"], 33691776)
+            self.assertEqual(payload["parameters"], 9979040)
+            self.assertEqual(payload["model"], {
+                "vocab_size": 50257, "sequence_length": 512, "layers": 6,
+                "d_model": 160, "heads": 4, "d_ff": 640, "dropout": 0.1,
+            })
             self.assertEqual(payload["effective_batch_size"], 64)
+            self.assertEqual(payload["maximum_padded_tokens_per_update"], 32768)
             self.assertFalse(output.exists())
+
+    def test_cli_legacy_architecture_overrides_and_resume_dry_run(self):
+        from transformer_training.cli import main
+
+        legacy = ModelConfig(layers=8, d_model=384, heads=6, d_ff=1536)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "legacy.pt"
+            # Only configuration metadata is needed by the resume dry-run path.
+            save_checkpoint(checkpoint, {
+                "version": CHECKPOINT_VERSION, "model_config": asdict(legacy),
+                "training_config": asdict(self.config),
+            })
+            for options in (["--layers", "8", "--d-model", "384", "--heads", "6", "--d-ff", "1536"],
+                            ["--resume", str(checkpoint)]):
+                with self.subTest(options=options), redirect_stdout(io.StringIO()) as stdout, \
+                        patch("transformer_training.data.load_tinystories") as data:
+                    self.assertEqual(main(["--dry-run", *options]), 0)
+                    payload = json.loads(stdout.getvalue())
+                    self.assertEqual(payload["model"], asdict(legacy))
+                    self.assertEqual(payload["parameters"], 33691776)
+                    data.assert_not_called()
+            for options in (["--layers", "6"], ["--d-model", "160"],
+                            ["--heads", "4"], ["--d-ff", "640"]):
+                with self.subTest(options=options), redirect_stderr(io.StringIO()), \
+                        patch("transformer_training.data.load_tinystories") as data:
+                    with self.assertRaises(SystemExit) as error:
+                        main(["--dry-run", "--resume", str(checkpoint), *options])
+                    self.assertEqual(error.exception.code, 2)
+                    data.assert_not_called()
 
     def test_cli_resume_inherits_configuration_and_data_options(self):
         from transformer_training.cli import main

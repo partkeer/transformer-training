@@ -8,10 +8,10 @@ import math
 class ModelConfig:
     vocab_size: int = 50257
     sequence_length: int = 512
-    layers: int = 8
-    d_model: int = 384
-    heads: int = 6
-    d_ff: int = 1536
+    layers: int = 6
+    d_model: int = 160
+    heads: int = 4
+    d_ff: int = 640
     dropout: float = 0.1
 
     def __post_init__(self):

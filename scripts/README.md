@@ -78,12 +78,19 @@ precision choices and interruption recovery.
 .\.venv\Scripts\python.exe scripts\train.py --resume runs\tinystories-fp32\latest.pt
 ```
 
-The default is one cleaned TinyStories epoch using a 33.7M-parameter model,
+The default is one cleaned TinyStories epoch using a 9,979,040-parameter model
+(6 layers, width 160, 4 heads, feed-forward width 640),
 512-token context, FP32, microbatch size 8 and 8 accumulation steps. Training
 always audits both full source splits and excludes exact validation matches from
 training before optional `--max-stories` sampling. Source loading, audit and
 tokenisation are outside measured training time. Nothing starts merely by
 importing the package; `--dry-run` also bypasses data loading entirely.
+
+Start a fresh run without `--resume` to use the smaller default. Existing
+checkpoints resume their saved architecture; incompatible explicit model flags
+are rejected. To reproduce the original 33,691,776-parameter architecture, pass
+`--layers 8 --d-model 384 --heads 6 --d-ff 1536`. The 70.4% parameter reduction
+is not a measured training speedup; GPU performance and quality remain unmeasured.
 
 ## Evaluate checkpoint quality
 

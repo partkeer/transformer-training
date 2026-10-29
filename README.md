@@ -285,12 +285,26 @@ prints the intended CUDA training configuration even on a CPU-only machine.
 
 ### Architecture and defaults
 
-The model has **33,691,776 parameters**: 8 pre-LayerNorm blocks, width 384,
-6 attention heads, GELU feed-forward width 1,536, learned positions for 512 tokens,
-and a final LayerNorm. GPT-2's 50,257-token input embedding is tied to the output
-projection. Dropout is 0.1. Linear/embedding weights use normal initialisation
+The default model has **9,979,040 parameters**: 6 pre-LayerNorm blocks, width 160,
+4 attention heads (40 dimensions each), GELU feed-forward width 640, learned
+positions for 512 tokens, and a final LayerNorm. GPT-2's 50,257-token input
+embedding is tied to the output projection. Dropout is 0.1. Linear/embedding weights use normal initialisation
 with standard deviation 0.02; residual output projections use
 `0.02 / sqrt(2 * layers)`. Biases start at zero and LayerNorm scales at one.
+
+This is a 70.4% parameter reduction from the original 33,691,776-parameter model.
+Six blocks retain depth, and feed-forward width remains four times model width.
+The tied embedding/output matrix accounts for 8,041,120 parameters (80.6%).
+The tokenizer, context length and training settings are unchanged. Reduced
+parameter count does not establish an equivalent speedup: vocabulary-sized
+logits and other overhead remain, and GPU throughput, peak memory and validation
+quality still need measurement under matched conditions.
+
+Use a fresh run directory without `--resume` to train the smaller model. Resuming
+an existing checkpoint retains its saved architecture, including the original
+33.69M model; incompatible explicit architecture overrides are rejected. To
+reproduce the original architecture for a new run, pass
+`--layers 8 --d-model 384 --heads 6 --d-ff 1536` (add `--dry-run` to inspect only).
 
 Attention is an explicit PyTorch reference implementation combining causal and
 padding masks, with FP32 softmax. Inputs must have nonempty right-padded prefixes.
@@ -471,10 +485,18 @@ failure handling, and interrupted-versus-uninterrupted continuation with dropout
 and worker prefetch. A subprocess test proves dry-run does not import datasets or
 create a run directory. CUDA precision tests skip explicitly when no GPU exists.
 
-Original training implementation verification used Python 3.14.7 and PyTorch 2.14.1+cpu:
-32 tests ran, with 31 passing and one CUDA test explicitly skipped. The default
-dry run reported 33,691,776 parameters and a 64-window effective batch. Dependency
-validation (`pip check`) and Git whitespace checks passed.
+Historical verification of the original training implementation used Python 3.14.7
+and PyTorch 2.14.1+cpu: 32 tests ran, with 31 passing and one CUDA test explicitly
+skipped. The then-default dry run reported 33,691,776 parameters and a 64-window
+effective batch. Dependency validation (`pip check`) and Git whitespace checks
+passed.
+
+Verification of the 9.98M default used Python 3.14.7 and PyTorch 2.14.1+cpu:
+83 tests ran, with 80 passing and three CUDA checks explicitly skipped. This
+included a synthetic CPU forward/backward and masking check using the default
+architecture, dry-run side-effect checks, legacy architecture overrides, and
+checkpoint configuration inheritance/rejection. The default dry run reported
+9,979,040 parameters and a 64-window effective batch. Git whitespace checks passed.
 
 Implementation verification has not downloaded/tokenised the full cleaned corpus,
 started TinyStories training, measured cloud GPU performance/memory, established
