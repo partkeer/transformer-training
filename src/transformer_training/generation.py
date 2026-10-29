@@ -85,6 +85,8 @@ def generate(model, tokenizer, prompt, *, max_new_tokens=128, temperature=0.8,
                     next_id = int(torch.multinomial(logits.softmax(dim=-1), 1,
                                                    generator=generator).item())
             new_ids.append(next_id)
+            # Release compiled outputs before the next CUDA-graph invocation.
+            del logits
             if next_id == eos_id:
                 stop_reason = "eos"
                 break

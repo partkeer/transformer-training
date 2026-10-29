@@ -11,6 +11,7 @@ import sys
 import time
 
 from .config import ModelConfig, TrainingConfig
+from .implementations import add_implementation_arguments, resolve_implementation
 
 
 def build_parser():
@@ -38,6 +39,7 @@ def build_parser():
                 options["choices"] = ["fp32", "bf16", "fp16"]
             parser.add_argument("--" + field.name.replace("_", "-"), **options)
     parser.add_argument("--revision", help="Dataset revision (default: pinned EDA commit)")
+    add_implementation_arguments(parser)
     parser.add_argument("--tokenizer-revision", help="Tokenizer revision (default: pinned GPT-2 commit)")
     parser.add_argument("--max-stories", type=int, help="Seeded sample per split, after full leakage audit")
     parser.add_argument("--offline", action="store_true", help="Cached data and tokenizer only")
@@ -68,6 +70,7 @@ def main(argv=None):
         from .checkpoint import load_checkpoint
 
         saved = load_checkpoint(args.resume) if args.resume else None
+        implementation = resolve_implementation(args, saved)
         configs = []
         for cls, key in ((ModelConfig, "model_config"), (TrainingConfig, "training_config")):
             values = saved[key].copy() if saved else asdict(cls())
@@ -79,14 +82,17 @@ def main(argv=None):
         if saved is not None:
             from .training import validate_resume_settings
 
-            validate_resume_settings(saved, model_config, training_config)
+            validate_resume_settings(saved, model_config, training_config, implementation)
         if args.dry_run:
             from .model import DecoderOnlyTransformer
 
-            model = DecoderOnlyTransformer(model_config)
+            # Resolving compilation must not compile or initialise CUDA in dry runs.
+            model = DecoderOnlyTransformer(model_config, replace(implementation, compile=False,
+                                                                  compile_mode="default"))
             print(json.dumps({
                 "dry_run": True, "model": asdict(model_config),
                 "training": asdict(training_config),
+                "implementation": asdict(implementation),
                 "parameters": sum(p.numel() for p in model.parameters()),
                 "effective_batch_size": training_config.effective_batch_size,
                 "maximum_padded_tokens_per_update": training_config.effective_batch_size
@@ -132,7 +138,7 @@ def main(argv=None):
         preparation_seconds = time.perf_counter() - preparation_start
         model_config = replace(model_config, vocab_size=loaders.metadata["vocab_size"])
         trainer = Trainer(model_config, training_config, loaders, output, resume=args.resume,
-                          preparation_seconds=preparation_seconds)
+                          preparation_seconds=preparation_seconds, implementation=implementation)
         trainer.fit()
         return 0
     except (ValueError, RuntimeError, OSError, KeyError, FloatingPointError) as error:

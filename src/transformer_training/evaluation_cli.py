@@ -4,15 +4,18 @@ import argparse
 import json
 import os
 from pathlib import Path
+from .implementations import add_implementation_arguments
 
 
 def build_parser():
     parser = argparse.ArgumentParser(
         description="Evaluate a trained TinyStories checkpoint and generate story samples.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument("--checkpoint", required=True, type=Path,
                         help="Training checkpoint (best.pt or latest.pt)")
+    add_implementation_arguments(parser, evaluation=True)
     parser.add_argument("--output-dir", type=Path,
                         help="Fresh output directory; default <checkpoint-dir>/evaluations/<UTC-id>")
     parser.add_argument("--device", help="Override saved device: cpu, cuda or cuda:<index>")
@@ -41,6 +44,9 @@ def main(argv=None):
         os.environ["HF_DATASETS_OFFLINE"] = "1"
     options = vars(args).copy()
     options.pop("offline")
+    implementation_options = {key: options.pop(key) for key in
+                              ("attention", "sdpa_backend", "compile", "compile_mode")}
+    options["implementation_overrides"] = {k: v for k, v in implementation_options.items() if v is not None}
     try:
         from .quality import evaluate_checkpoint, _samples_text
 

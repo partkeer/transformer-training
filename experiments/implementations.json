@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "shared": {
+    "model": {},
+    "training": {},
+    "data": {},
+    "offline": false
+  },
+  "benchmark": {
+    "repeats": 5,
+    "warmup": 10,
+    "measured": 50,
+    "input_mode": "loader",
+    "timeout_seconds": 1800
+  },
+  "variants": [
+    {"id": "fp32"},
+    {"id": "bf16", "reference": "fp32", "precision": "bf16", "changes": ["training.precision"]},
+    {"id": "fp16", "reference": "fp32", "precision": "fp16", "changes": ["training.precision"]},
+    {"id": "sdpa-math", "reference": "fp32", "implementation": {"attention": "sdpa", "sdpa_backend": "math"}, "changes": ["implementation.attention", "implementation.sdpa_backend"]},
+    {"id": "sdpa-auto", "reference": "fp32", "implementation": {"attention": "sdpa"}, "changes": ["implementation.attention"]},
+    {"id": "bf16-flash", "reference": "bf16", "precision": "bf16", "implementation": {"attention": "sdpa", "sdpa_backend": "flash"}, "changes": ["implementation.attention", "implementation.sdpa_backend"]},
+    {"id": "bf16-efficient", "reference": "bf16", "precision": "bf16", "implementation": {"attention": "sdpa", "sdpa_backend": "efficient"}, "changes": ["implementation.attention", "implementation.sdpa_backend"]},
+    {"id": "bf16-cudnn", "reference": "bf16", "precision": "bf16", "implementation": {"attention": "sdpa", "sdpa_backend": "cudnn"}, "changes": ["implementation.attention", "implementation.sdpa_backend"]},
+    {"id": "compile-default", "reference": "fp32", "implementation": {"compile": true}, "changes": ["implementation.compile"]},
+    {"id": "compile-reduce-overhead", "reference": "fp32", "implementation": {"compile": true, "compile_mode": "reduce-overhead"}, "changes": ["implementation.compile", "implementation.compile_mode"]},
+    {"id": "compile-max-autotune", "reference": "fp32", "implementation": {"compile": true, "compile_mode": "max-autotune"}, "changes": ["implementation.compile", "implementation.compile_mode"]},
+    {"id": "compile-no-cudagraphs", "reference": "fp32", "implementation": {"compile": true, "compile_mode": "max-autotune-no-cudagraphs"}, "changes": ["implementation.compile", "implementation.compile_mode"]},
+    {"id": "foreach", "reference": "fp32", "implementation": {"optimizer_implementation": "foreach"}, "changes": ["implementation.optimizer_implementation"]},
+    {"id": "fused", "reference": "fp32", "implementation": {"optimizer_implementation": "fused"}, "changes": ["implementation.optimizer_implementation"]},
+    {"id": "checkpointing", "reference": "fp32", "implementation": {"activation_checkpointing": true}, "changes": ["implementation.activation_checkpointing"]},
+    {"id": "combined-example", "reference": "bf16-flash", "precision": "bf16", "implementation": {"attention": "sdpa", "sdpa_backend": "flash", "compile": true, "optimizer_implementation": "fused", "activation_checkpointing": true}, "changes": ["implementation.compile", "implementation.optimizer_implementation", "implementation.activation_checkpointing"]}
+  ]
+}

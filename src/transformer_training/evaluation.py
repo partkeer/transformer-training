@@ -26,7 +26,7 @@ def next_token_loss(logits, labels):
 
 
 @torch.no_grad()
-def evaluate(model, loader, *, device="cpu", precision="fp32"):
+def evaluate(model, loader, *, device="cpu", precision="fp32", shape_examples=None):
     """Divide summed token loss by all nonignored targets, including real EOS.
 
     Averaging batch means would overweight short or heavily padded batches.
@@ -37,6 +37,8 @@ def evaluate(model, loader, *, device="cpu", precision="fp32"):
     total_tokens = 0
     try:
         for cpu_batch in loader:
+            if shape_examples is not None:
+                shape_examples.setdefault(tuple(cpu_batch["input_ids"].shape), cpu_batch)
             total_tokens += int((cpu_batch["labels"] != IGNORE_INDEX).sum())
             batch = move_batch(cpu_batch, device)
             with autocast_context(device, precision):

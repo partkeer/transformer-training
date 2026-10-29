@@ -5,6 +5,37 @@ import math
 
 
 @dataclass(frozen=True)
+class ImplementationConfig:
+    """Execution choices only; architecture and parameter names do not change."""
+
+    attention: str = "reference"
+    sdpa_backend: str = "auto"
+    compile: bool = False
+    compile_mode: str = "default"
+    optimizer_implementation: str = "standard"
+    activation_checkpointing: bool = False
+
+    def __post_init__(self):
+        choices = {
+            "attention": {"reference", "sdpa"},
+            "sdpa_backend": {"auto", "math", "flash", "efficient", "cudnn"},
+            "compile_mode": {"default", "reduce-overhead", "max-autotune",
+                             "max-autotune-no-cudagraphs"},
+            "optimizer_implementation": {"standard", "foreach", "fused"},
+        }
+        for name, allowed in choices.items():
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"Invalid {name}: {getattr(self, name)!r}; choose {sorted(allowed)}")
+        for name in ("compile", "activation_checkpointing"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        if self.attention != "sdpa" and self.sdpa_backend != "auto":
+            raise ValueError("An explicit SDPA backend requires --attention sdpa")
+        if not self.compile and self.compile_mode != "default":
+            raise ValueError("A compile mode requires --compile")
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     vocab_size: int = 50257
     sequence_length: int = 512

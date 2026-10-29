@@ -11,6 +11,7 @@ import time
 
 from .cli import build_parser
 from .config import ModelConfig, TrainingConfig
+from .implementations import resolve_implementation
 
 
 def resolve_request(args, argv):
@@ -21,6 +22,7 @@ def resolve_request(args, argv):
     if "validation_loss_target" in explicit:
         explicit.add("validation_loss_targets")
     saved = load_checkpoint(args.resume) if args.resume else None
+    implementation = resolve_implementation(args, saved)
     configs = []
     for cls, key in ((ModelConfig, "model_config"), (TrainingConfig, "training_config")):
         values = saved[key].copy() if saved else asdict(cls())
@@ -30,7 +32,7 @@ def resolve_request(args, argv):
         configs.append(cls(**values))
     model, training = configs
     if saved:
-        validate_resume_settings(saved, model, training)
+        validate_resume_settings(saved, model, training, implementation, diagnostic=True)
     options = {"sequence_length": model.sequence_length, "batch_size": training.batch_size,
         "seed": training.seed, "num_workers": training.num_workers,
         "pin_memory": training.device.startswith("cuda"), "exclude_validation_overlap": True,
@@ -44,7 +46,8 @@ def resolve_request(args, argv):
             raise ValueError("Conflicting checkpoint data setting: " + key)
     if args.max_stories is not None and args.max_stories < 1:
         raise ValueError("max_stories must be positive")
-    return {"model": asdict(model), "training": asdict(training), "data_options": options,
+    return {"model": asdict(model), "training": asdict(training),
+            "implementation": asdict(implementation), "data_options": options,
             "checkpoint": str(args.resume.resolve()) if args.resume else None,
             "offline": args.offline, "warmup": args.warmup_attempts,
             "measured": args.measured_attempts, "input_mode": args.input_mode}
@@ -57,6 +60,7 @@ def worker(request):
     from .data import load_tinystories
     from .diagnostics import run_trial
     from .training import Trainer, validate_device
+    from .config import ImplementationConfig
 
     config = TrainingConfig(**request["training"])
     validate_device(config)
@@ -65,7 +69,8 @@ def worker(request):
     preparation = time.perf_counter() - start
     model = replace(ModelConfig(**request["model"]), vocab_size=loaders.metadata["vocab_size"])
     trainer = Trainer(model, config, loaders, request["output"], resume=request["checkpoint"],
-                      preparation_seconds=preparation, diagnostic=True)
+                      preparation_seconds=preparation, diagnostic=True,
+                      implementation=ImplementationConfig(**request.get("implementation", {})))
     try:
         result = run_trial(trainer, warmup=request["warmup"], measured=request["measured"],
                            mode=request["input_mode"], backend=request["backend"])
@@ -87,7 +92,9 @@ def launch_worker(request, output, *, timeout=1800):
     command = [sys.executable, "-m", "transformer_training.diagnostics_cli", "--worker", str(path.resolve())]
     with (output / "worker.log").open("w", encoding="utf-8") as log:
         try:
-            process = run_bounded(command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout)
+            from .experiments import worker_environment
+            process = run_bounded(command, stdout=log, stderr=subprocess.STDOUT, timeout=timeout,
+                                  env=worker_environment(output / "compiler-cache"))
         except subprocess.TimeoutExpired as error:
             atomic_json(output / "worker_status.json", {"status": "timeout", "reason": str(error)})
             raise RuntimeError(f"Trial timed out; see {output / 'worker.log'}") from error
@@ -113,6 +120,8 @@ def main(kind="benchmark", argv=None):
     parser.add_argument("--timeline", type=Path, help="Prior profile JSON with ranked kernels, required by ncu alone")
     parser.add_argument("--followup-counters", action="store_true", help="Opt in to occupancy and stall diagnostics")
     parser.add_argument("--compare", type=Path, help="Baseline benchmark JSON")
+    parser.add_argument("--allow-change", action="append", default=[],
+                        help="Declared difference for --compare, e.g. implementation.attention or training.precision")
     parser.add_argument("--import-path", type=Path)
     parser.add_argument("--import-kind", choices=["chrome", "nsys", "ncu"])
     args = parser.parse_args(argv)
@@ -170,7 +179,8 @@ def main(kind="benchmark", argv=None):
                 trials.append(trial)
             report = aggregate_trials(trials)
             if args.compare:
-                report["baseline_comparison"] = compare_results(json.loads(args.compare.read_text()), report)
+                report["baseline_comparison"] = compare_results(json.loads(args.compare.read_text()), report,
+                                                               allowed_changes=args.allow_change)
         else:
             from .nsight import capture_compute, capture_systems
             backends = ["pytorch", "memory", "nsys", "ncu"] if args.backend == "all" else [args.backend]

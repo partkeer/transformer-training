@@ -1,16 +1,22 @@
-"""Small pre-LayerNorm decoder with explicit reference attention."""
+"""Small pre-LayerNorm decoder with switchable execution implementations."""
 
 import math
+import time
+from contextlib import nullcontext
 
 import torch
 from torch import nn
+from torch.nn import functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.utils.checkpoint import checkpoint
 
-from .config import ModelConfig
+from .config import ImplementationConfig, ModelConfig
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, implementation=None):
         super().__init__()
+        self.implementation = implementation or ImplementationConfig()
         self.heads = config.heads
         self.head_dim = config.d_model // config.heads
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model)
@@ -22,19 +28,32 @@ class CausalSelfAttention(nn.Module):
         b, t, c = x.shape
         q, k, v = self.qkv(x).reshape(b, t, 3, self.heads, self.head_dim).unbind(2)
         q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
-        scores = (q / math.sqrt(self.head_dim)) @ k.transpose(-2, -1)
-        scores = scores.masked_fill(~allowed, float("-inf"))
-        # Accumulate softmax in FP32, including in mixed-precision runs.
-        weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(v.dtype)
-        x = (self.dropout(weights) @ v).transpose(1, 2).contiguous().reshape(b, t, c)
+        if self.implementation.attention == "sdpa":
+            # Valid queries precede every padded key under our right-prefix
+            # contract. Causality alone therefore isolates all valid outputs.
+            backends = {"math": SDPBackend.MATH, "flash": SDPBackend.FLASH_ATTENTION,
+                        "efficient": SDPBackend.EFFICIENT_ATTENTION, "cudnn": SDPBackend.CUDNN_ATTENTION}
+            requested = self.implementation.sdpa_backend
+            # Re-enter during checkpoint recomputation as well as the first pass.
+            context = sdpa_kernel(backends[requested]) if requested != "auto" else nullcontext()
+            with context:
+                x = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                    dropout_p=self.dropout.p if self.training else 0.0)
+        else:
+            scores = (q / math.sqrt(self.head_dim)) @ k.transpose(-2, -1)
+            scores = scores.masked_fill(~allowed, float("-inf"))
+            # Accumulate softmax in FP32, including in mixed-precision runs.
+            weights = torch.softmax(scores, dim=-1, dtype=torch.float32).to(v.dtype)
+            x = self.dropout(weights) @ v
+        x = x.transpose(1, 2).contiguous().reshape(b, t, c)
         return self.residual_dropout(self.output(x))
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, implementation=None):
         super().__init__()
         self.attention_norm = nn.LayerNorm(config.d_model)
-        self.attention = CausalSelfAttention(config)
+        self.attention = CausalSelfAttention(config, implementation)
         self.ff_norm = nn.LayerNorm(config.d_model)
         self.ff = nn.Sequential(
             nn.Linear(config.d_model, config.d_ff), nn.GELU(),
@@ -53,13 +72,14 @@ class DecoderOnlyTransformer(nn.Module):
     query logits are finite but unspecified and must be ignored by the loss.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, implementation=None):
         super().__init__()
         self.config = config
+        self.implementation = implementation or ImplementationConfig()
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.position_embedding = nn.Embedding(config.sequence_length, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
-        self.blocks = nn.ModuleList(DecoderBlock(config) for _ in range(config.layers))
+        self.blocks = nn.ModuleList(DecoderBlock(config, self.implementation) for _ in range(config.layers))
         self.final_norm = nn.LayerNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.lm_head.weight = self.token_embedding.weight
@@ -74,6 +94,13 @@ class DecoderOnlyTransformer(nn.Module):
         self.register_buffer("causal_mask", torch.ones(
             config.sequence_length, config.sequence_length, dtype=torch.bool
         ).tril(), persistent=False)
+        self.compile_wrapper_seconds = 0.0
+        self._compiled_forward = None
+        if self.implementation.compile:
+            started = time.perf_counter()
+            self._compiled_forward = torch.compile(self._forward_tensors, backend="inductor",
+                mode=self.implementation.compile_mode, fullgraph=True)
+            self.compile_wrapper_seconds = time.perf_counter() - started
 
     @staticmethod
     def _init_module(module):
@@ -99,9 +126,23 @@ class DecoderOnlyTransformer(nn.Module):
         if (not attention_mask[:, 0].all()
                 or (attention_mask[:, 1:] & ~attention_mask[:, :-1]).any()):
             raise ValueError("attention_mask must contain nonempty right-padded prefixes")
-        allowed = self.causal_mask[None, None, :t, :t] & attention_mask[:, None, None, :]
+        # Backend selection and value-dependent validation stay outside the graph.
+        backends = {"math": SDPBackend.MATH, "flash": SDPBackend.FLASH_ATTENTION,
+                    "efficient": SDPBackend.EFFICIENT_ATTENTION, "cudnn": SDPBackend.CUDNN_ATTENTION}
+        requested = self.implementation.sdpa_backend
+        context = sdpa_kernel(backends[requested]) if requested != "auto" else nullcontext()
+        with context:
+            return (self._compiled_forward or self._forward_tensors)(input_ids, attention_mask)
+
+    def _forward_tensors(self, input_ids, attention_mask):
+        t = input_ids.shape[1]
+        allowed = (self.causal_mask[None, None, :t, :t] & attention_mask[:, None, None, :]
+                   if self.implementation.attention == "reference" else None)
         positions = torch.arange(t, device=input_ids.device)
         x = self.dropout(self.token_embedding(input_ids) + self.position_embedding(positions))
         for block in self.blocks:
-            x = block(x, allowed)
+            if self.implementation.activation_checkpointing and self.training and torch.is_grad_enabled():
+                x = checkpoint(block, x, allowed, use_reentrant=False, preserve_rng_state=True)
+            else:
+                x = block(x, allowed)
         return self.lm_head(self.final_norm(x))

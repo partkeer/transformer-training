@@ -11,6 +11,7 @@ from .config import ModelConfig, TrainingConfig
 from .evaluation import evaluate
 from .generation import DEFAULT_PROMPTS, encode_prompt, generate, validate_generation_options
 from .model import DecoderOnlyTransformer
+from .implementations import resolve_implementation, execution_report
 from .training import CHECKPOINT_VERSION, environment, validate_device
 
 
@@ -62,7 +63,7 @@ def _samples_text(samples, *, include_complete_text=True):
 def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=None,
                         batch_size=None, num_workers=0, full_validation=False,
                         prompts=None, skip_generation=False, max_new_tokens=128,
-                        temperature=0.8, top_k=50, seed=42):
+                        temperature=0.8, top_k=50, seed=42, implementation_overrides=None):
     """Evaluate a training checkpoint and atomically write new quality artifacts.
 
     Configure HF_HOME/offline mode before importing Hugging Face libraries (the
@@ -75,6 +76,11 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
         raise ValueError("Unsupported checkpoint version")
     model_config = ModelConfig(**payload["model_config"])
     training_config = TrainingConfig(**payload["training_config"])
+    import argparse
+    allowed = {"attention", "sdpa_backend", "compile", "compile_mode"}
+    if set(implementation_overrides or {}) - allowed:
+        raise ValueError("Unsupported evaluation implementation override")
+    implementation = resolve_implementation(argparse.Namespace(**(implementation_overrides or {})), payload)
     overrides = {"num_workers": num_workers}
     for key, value in (("device", device), ("precision", precision), ("batch_size", batch_size)):
         if value is not None:
@@ -103,11 +109,12 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
         raise ValueError(f"Evaluation output directory must be empty: {output}")
 
     # Instantiate/load strictly before downloads; do not retain optimizer tensors.
-    model = DecoderOnlyTransformer(model_config)
+    model = DecoderOnlyTransformer(model_config, implementation)
     model.load_state_dict(payload["model"], strict=True)
     checkpoint_updates = payload["state"]["updates"]
     del payload
     model.to(target_device)
+    model.eval()
     from .data import load_tinystories_validation
 
     validation = load_tinystories_validation(
@@ -121,8 +128,9 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
     if not skip_generation:
         for prompt in selected_prompts:
             encode_prompt(validation.tokenizer, prompt, model_config.sequence_length)
+    shapes = {} if implementation.attention == "sdpa" else None
     metrics = loss_metrics(evaluate(model, validation.validation, device=target_device,
-                                   precision=config.precision))
+                                   precision=config.precision, shape_examples=shapes))
     metrics["evaluated_windows"] = len(validation.validation.dataset)
     samples = [] if skip_generation else [
         generate(model, validation.tokenizer, prompt, max_new_tokens=max_new_tokens,
@@ -130,6 +138,11 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
                  precision=config.precision)
         for index, prompt in enumerate(selected_prompts)
     ]
+    if implementation.attention == "sdpa":
+        from .attention_evidence import capture_attention
+        # Evaluation capture runs after metric computation and creates no optimizer.
+        model.attention_evidence = capture_attention(model, list(shapes.values()), device=target_device,
+            precision=config.precision, environment=environment(target_device), backward=False)
     report = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint": str(checkpoint), "checkpoint_updates": checkpoint_updates,
@@ -141,6 +154,8 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
         "data": validation.metadata,
         "training_overlap_exclusion": signature.get("exclude_validation_overlap"),
         "environment": environment(target_device), "metrics": metrics,
+        "implementation": asdict(implementation), "execution": dict(execution_report(model),
+            optimizer="not_applicable", activation_checkpointing_active=False),
         "generation": {"skipped": skip_generation,
                        "prompts": [] if skip_generation else selected_prompts,
                        "max_new_tokens": max_new_tokens, "temperature": temperature,

@@ -1,6 +1,6 @@
 """Small PyTorch components for reproducible TinyStories experiments."""
 
-from .config import ModelConfig, TrainingConfig
+from .config import ImplementationConfig, ModelConfig, TrainingConfig
 from .model import DecoderOnlyTransformer
 
-__all__ = ["ModelConfig", "TrainingConfig", "DecoderOnlyTransformer"]
+__all__ = ["ImplementationConfig", "ModelConfig", "TrainingConfig", "DecoderOnlyTransformer"]

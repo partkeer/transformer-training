@@ -16,7 +16,9 @@ import torch
 from torch.utils.data import DataLoader, Sampler
 
 from .checkpoint import atomic_json, capture_rng, load_checkpoint, restore_rng, save_checkpoint
-from .config import ModelConfig, TrainingConfig
+from .config import ImplementationConfig, ModelConfig, TrainingConfig
+from .implementations import (compiler_snapshot, compilation_changed, execution_report,
+                              configure_restored_optimizer, file_sha256, optimizer_flags)
 from .evaluation import IGNORE_INDEX, autocast_context, evaluate, move_batch, next_token_loss
 from .model import DecoderOnlyTransformer
 from .measurements import Invocation, Phases, DeviceMemorySampler, source_identity, unavailable
@@ -46,18 +48,25 @@ def validate_output_directory(output_dir, *, resume=None):
             break
 
 
-def validate_resume_settings(payload, model_config, config):
+def validate_resume_settings(payload, model_config, config, implementation=None, *, diagnostic=False):
     """Check compatibility that does not depend on preparing the dataset."""
     if payload["version"] != CHECKPOINT_VERSION:
         raise ValueError("Unsupported checkpoint version")
     current = asdict(config)
     saved = asdict(TrainingConfig(**payload["training_config"]))
+    if diagnostic:
+        current.pop("precision", None)
+        saved.pop("precision", None)
     for key in ("num_workers", "log_every", "eval_every", "checkpoint_every",
                 "validation_loss_targets", "supervised_token_budget", "timing_warmup_steps"):
         current.pop(key, None)
         saved.pop(key, None)
     if payload["model_config"] != asdict(model_config) or saved != current:
         raise ValueError("Incompatible model/training settings for resume")
+    if not diagnostic and ImplementationConfig(**payload.get("implementation_config", {})) != (
+        implementation or ImplementationConfig()
+    ):
+        raise ValueError("Incompatible implementation settings for resume")
 
 
 def clip_gradients(parameters, max_norm, *, allow_nonfinite_gradients=False):
@@ -170,7 +179,7 @@ class WarmupCosine:
         self._apply()
 
 
-def make_optimizer(model, config):
+def make_optimizer(model, config, implementation=None):
     # model.parameters() removes aliases, so tied embeddings appear only once.
     decay, no_decay = [], []
     for parameter in model.parameters():
@@ -179,7 +188,7 @@ def make_optimizer(model, config):
         [{"params": decay, "weight_decay": config.weight_decay},
          {"params": no_decay, "weight_decay": 0.0}],
         lr=config.learning_rate, betas=(config.beta1, config.beta2), eps=config.eps,
-        foreach=False, fused=False,
+        **optimizer_flags(implementation or getattr(model, "implementation", ImplementationConfig())),
     )
 
 
@@ -277,10 +286,19 @@ class Trainer:
     """
 
     def __init__(self, model_config: ModelConfig, config: TrainingConfig, loaders,
-                 output_dir, *, resume=None, preparation_seconds=None, diagnostic=False):
+                 output_dir, *, resume=None, preparation_seconds=None, diagnostic=False,
+                 implementation=None):
         self.invocation = Invocation(config.timing_warmup_steps)
         self.preparation_seconds = preparation_seconds
         self.diagnostic = diagnostic
+        self.implementation = implementation or ImplementationConfig(**(
+            load_checkpoint(resume).get("implementation_config", {}) if resume else {}))
+        self.checkpoint_sha256 = file_sha256(resume) if resume else None
+        self.compilation_contaminated = False
+        self.compile_attempts = []
+        self.representative_batches = {}
+        self.first_forward_backward_attempt_seconds = None
+        self.warmup_seconds = 0.0
         self.phases = Phases()
         self.target_observations = {}
         self.prior_active_seconds = 0.0
@@ -297,8 +315,8 @@ class Trainer:
         validate_output_directory(self.output_dir, resume=resume)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         seed_everything(config.seed)
-        self.model = DecoderOnlyTransformer(model_config).to(self.device)
-        self.optimizer = make_optimizer(self.model, config)
+        self.model = DecoderOnlyTransformer(model_config, self.implementation).to(self.device)
+        self.optimizer = make_optimizer(self.model, config, self.implementation)
         batches = math.ceil(len(loaders.train.dataset) / config.batch_size)
         self.total_updates = config.epochs * math.ceil(batches / config.gradient_accumulation_steps)
         if config.max_steps is not None:
@@ -314,6 +332,7 @@ class Trainer:
         if resume is not None:
             self._restore(resume)
         record = {"model": asdict(model_config), "training": asdict(config),
+                  "implementation": asdict(self.implementation),
                   "effective_batch_size": config.effective_batch_size,
                   "schedule_updates": self.total_updates,
                   "parameters": sum(p.numel() for p in self.model.parameters()),
@@ -340,13 +359,18 @@ class Trainer:
 
     def _restore(self, path):
         payload = load_checkpoint(path)
-        validate_resume_settings(payload, self.model_config, self.config)
+        validate_resume_settings(payload, self.model_config, self.config, self.implementation,
+                                 diagnostic=self.diagnostic)
         if payload["data_signature"] != self.signature:
             raise ValueError("Data fingerprints, revisions or preprocessing policy changed")
         self.model.load_state_dict(payload["model"])
         self.optimizer.load_state_dict(payload["optimizer"])
+        # load_state_dict restores saved implementation flags as well as moments.
+        configure_restored_optimizer(self.optimizer, self.implementation)
         self.scheduler.load_state_dict(payload["scheduler"])
-        self.scaler.load_state_dict(payload["scaler"])
+        saved_precision = payload["training_config"]["precision"]
+        if saved_precision == self.config.precision:
+            self.scaler.load_state_dict(payload["scaler"])
         self.state = payload["state"]
         self.state.setdefault("applied_supervised_tokens", None)
         prior = payload.get("measurements", {})
@@ -378,6 +402,8 @@ class Trainer:
         save_checkpoint(self.output_dir / name, {
             "version": CHECKPOINT_VERSION, "model_config": asdict(self.model_config),
             "training_config": asdict(self.config), "data_signature": self.signature,
+            "implementation_config": asdict(self.implementation),
+            "execution": execution_report(self.model),
             "model": self.model.state_dict(), "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(), "scaler": self.scaler.state_dict(),
             "rng": capture_rng(), "state": self.state,
@@ -452,6 +478,13 @@ class Trainer:
         # End the lifecycle clock before measurement/report serialization.
         result = self.invocation.snapshot(status=status)
         result.update(preparation_seconds=self.preparation_seconds, error=error,
+                      execution=execution_report(self.model),
+                      compilation_contaminated=self.compilation_contaminated,
+                      compilation_attempts=self.compile_attempts,
+                      first_forward_backward_attempt_seconds=self.first_forward_backward_attempt_seconds,
+                      warmup_seconds=self.warmup_seconds,
+                      timings_eligible_for_comparison=not self.compilation_contaminated and
+                          (not self.implementation.compile or compiler_snapshot(True)["status"] == "available"),
                       timing_complete=status == "complete",
                       historical_measurements_known=getattr(self, "history_known", True),
                       quality_targets={str(t): self.target_observations.get(str(t))
@@ -466,6 +499,11 @@ class Trainer:
         result["peak_allocated_bytes"] = torch.cuda.max_memory_allocated(self.device) if self.device.type == "cuda" else None
         result["peak_reserved_bytes"] = torch.cuda.max_memory_reserved(self.device) if self.device.type == "cuda" else None
         result["allocator_measurement"] = {"status": "available", "scope": "training lifecycle"} if self.device.type == "cuda" else unavailable("CUDA allocator measurements are unavailable on CPU")
+        if status in {"complete", "interrupted"} and self.representative_batches and self.implementation.attention == "sdpa":
+            from .attention_evidence import capture_attention
+            self.model.attention_evidence = capture_attention(self.model, list(self.representative_batches.values()),
+                device=self.device, precision=self.config.precision, environment=self.env)
+            result["execution"]["attention_evidence"] = self.model.attention_evidence
         atomic_json(self.output_dir / "invocations" / self.invocation.id / "measurement.json", result)
         self._log({"event": "invocation_end", "measurement": result})
         return result
@@ -493,8 +531,12 @@ class Trainer:
                     batches = list(itertools.islice(iterator, c.gradient_accumulation_steps))
                 if not batches:
                     raise RuntimeError("DataLoader ended before the consumed cursor reached its end")
+                for batch in batches:
+                    self.representative_batches.setdefault(tuple(batch["input_ids"].shape), batch)
+                compiler_before = compiler_snapshot(c_enabled := self.implementation.compile)
                 result = optimizer_attempt(self.model, self.optimizer, self.scaler, self.scheduler,
                                            batches, c, self.device, phases=self.phases)
+                compiler_after = compiler_snapshot(c_enabled)
                 skipped, lr = result["skipped"], result["learning_rate"]
                 state["attempts"] += 1
                 state["consumed_examples"] += result["examples"]
@@ -508,6 +550,16 @@ class Trainer:
                 self._sync()
                 elapsed = time.perf_counter() - start
                 self.invocation.record(result["supervised_tokens"], elapsed, skipped)
+                if self.invocation.attempts == 1:
+                    self.first_forward_backward_attempt_seconds = elapsed
+                if self.invocation.attempts <= c.timing_warmup_steps:
+                    self.warmup_seconds += elapsed
+                if compilation_changed(compiler_before, compiler_after):
+                    entry = {"attempt": self.invocation.attempts, "attempt_seconds": elapsed,
+                             "compiler": compiler_after}
+                    self.compile_attempts.append(entry)
+                    self.compilation_contaminated |= self.invocation.attempts > c.timing_warmup_steps
+                    self._log({"event": "compilation", **entry})
                 if result["nonfinite_gradients"]:
                     self.invocation.numerical_failures += 1
                     self._log({"event": "numerical_failure", "kind": "nonfinite_gradients",

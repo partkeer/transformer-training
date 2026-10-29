@@ -19,12 +19,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from .audit import audit_overlap
+from .data_identity import DATASET_REVISION, TOKENIZER_REVISION
 
 DATASET = "roneneldan/TinyStories"
-# Match the existing EDA; the tokenizer is also pinned to an immutable Hub commit.
-DATASET_REVISION = "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
+# Match the existing EDA; both source revisions are pinned in data_identity.
 TOKENIZER = "openai-community/gpt2"
-TOKENIZER_REVISION = "607a30d783dfa663caf39e06633721c8d4cfcd7e"
 IGNORE_INDEX = -100
 
 
