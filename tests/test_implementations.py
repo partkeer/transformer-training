@@ -188,6 +188,7 @@ class ImplementationTests(unittest.TestCase):
     def test_compile_boundary_and_state_dict_with_aot_eager(self):
         # AOT eager verifies Dynamo/AOT capture and backward without requiring a
         # local C++/CUDA codegen toolchain. This is not an Inductor speed test.
+        self.addCleanup(torch.compiler.reset)
         actual_compile = torch.compile
         def compile_for_test(function, **options):
             self.assertEqual(options["backend"], "inductor")
@@ -195,6 +196,10 @@ class ImplementationTests(unittest.TestCase):
             return actual_compile(function, backend="aot_eager", fullgraph=True)
         for attention in ("reference", "sdpa"):
             with self.subTest(attention=attention), patch("torch.compile", side_effect=compile_for_test):
+                # Independent models/backends share this method's Dynamo code
+                # cache, including earlier CUDA tests. Keep the shape and mode
+                # transitions below together, but isolate each attention case.
+                torch.compiler.reset()
                 impl = ImplementationConfig(attention=attention)
                 plain = DecoderOnlyTransformer(self.model, impl)
                 model = DecoderOnlyTransformer(self.model, replace(impl, compile=True, activation_checkpointing=True))
@@ -273,10 +278,14 @@ class CudaImplementationTests(unittest.TestCase):
             self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters()))
 
     def test_inductor_modes_forward_backward_and_partial_batch(self):
+        self.addCleanup(torch.compiler.reset)
         config = ModelConfig(vocab_size=12, sequence_length=4, layers=1,
                              d_model=32, heads=4, d_ff=64, dropout=0)
         reference = DecoderOnlyTransformer(config).cuda()
         for mode in ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"):
+            # Each compiler mode is an independent case. Retain both batch
+            # shapes in its cache so partial-batch recompilation stays tested.
+            torch.compiler.reset()
             model = DecoderOnlyTransformer(config, ImplementationConfig(attention="sdpa", compile=True,
                 compile_mode=mode, activation_checkpointing=True)).cuda()
             model.load_state_dict(reference.state_dict())
