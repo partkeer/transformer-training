@@ -32,6 +32,11 @@ carefully chosen custom GPU kernel.
 
 ## Implementation contracts
 
+- When writing or modifying code, add or update a clear docstring or adjacent
+  comment for each function you create or change. Explain the function's purpose
+  in plain language for the user, including relevant inputs, outputs, and
+  non-obvious behaviour or constraints. Describe intent rather than merely
+  repeating the function name or individual code statements.
 - Keep runnable scripts thin; put reusable behaviour in `src/transformer_training/`.
   Training and standalone checkpoint evaluation must share the validation code.
 - Labels are already shifted next-token targets. Do not shift them again.
