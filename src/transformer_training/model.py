@@ -15,6 +15,9 @@ from .config import ImplementationConfig, ModelConfig
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, implementation=None):
+        """Create query/key/value and output projections for the configured heads, with
+        separate attention and residual dropout and an explicit execution choice.
+        """
         super().__init__()
         self.implementation = implementation or ImplementationConfig()
         self.heads = config.heads
@@ -25,6 +28,11 @@ class CausalSelfAttention(nn.Module):
         self.residual_dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, allowed):
+        """Map [batch, sequence, width] hidden states to the same shape using causal
+        multihead attention. Reference attention uses the allowed-key mask; SDPA
+        relies on validated right-padded prefixes and disables attention dropout in
+        evaluation.
+        """
         b, t, c = x.shape
         q, k, v = self.qkv(x).reshape(b, t, 3, self.heads, self.head_dim).unbind(2)
         q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
@@ -51,6 +59,9 @@ class CausalSelfAttention(nn.Module):
 
 class DecoderBlock(nn.Module):
     def __init__(self, config, implementation=None):
+        """Build pre-LayerNorm attention and GELU feed-forward networks, each with a
+        residual path and the configured model width.
+        """
         super().__init__()
         self.attention_norm = nn.LayerNorm(config.d_model)
         self.attention = CausalSelfAttention(config, implementation)
@@ -61,6 +72,10 @@ class DecoderBlock(nn.Module):
         )
 
     def forward(self, x, allowed):
+        """Apply normalised causal attention followed by the normalised feed-forward
+        network, adding each result to its residual input and preserving hidden-
+        state shape.
+        """
         x = x + self.attention(self.attention_norm(x), allowed)
         return x + self.ff(self.ff_norm(x))
 
@@ -73,6 +88,10 @@ class DecoderOnlyTransformer(nn.Module):
     """
 
     def __init__(self, config: ModelConfig, implementation=None):
+        """Build the decoder, tie the output head to token embeddings, and initialise
+        residual projections with depth scaling. Optionally wrap the tensor-only
+        forward path with torch.compile; compilation work can occur on later calls.
+        """
         super().__init__()
         self.config = config
         self.implementation = implementation or ImplementationConfig()
@@ -104,6 +123,10 @@ class DecoderOnlyTransformer(nn.Module):
 
     @staticmethod
     def _init_module(module):
+        """Initialise linear weights and biases and LayerNorm scales and offsets in
+        place; tied embeddings are initialised separately to avoid visiting them
+        twice.
+        """
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, std=0.02)
             if module.bias is not None:
@@ -113,6 +136,11 @@ class DecoderOnlyTransformer(nn.Module):
             nn.init.zeros_(module.bias)
 
     def forward(self, input_ids, attention_mask=None):
+        """Validate int64 [batch, sequence] token IDs and an optional boolean padding
+        mask, then return [batch, sequence, vocabulary] logits. Require nonempty
+        right-padded prefixes within the context limit; enforce causality separately
+        from padding.
+        """
         if input_ids.ndim != 2 or input_ids.dtype != torch.long:
             raise ValueError("input_ids must be int64 [batch, sequence]")
         b, t = input_ids.shape
@@ -135,6 +163,10 @@ class DecoderOnlyTransformer(nn.Module):
             return (self._compiled_forward or self._forward_tensors)(input_ids, attention_mask)
 
     def _forward_tensors(self, input_ids, attention_mask):
+        """Compute position-aware logits for validated inputs. Combine causal and
+        padding masks for reference attention, and optionally recompute training
+        blocks during backward while preserving dropout RNG state.
+        """
         t = input_ids.shape[1]
         allowed = (self.causal_mask[None, None, :t, :t] & attention_mask[:, None, None, :]
                    if self.implementation.attention == "reference" else None)

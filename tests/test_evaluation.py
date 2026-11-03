@@ -39,6 +39,9 @@ TOKENIZER_REVISION = "b" * 40
 
 
 def quality_splits():
+    """Return local train/validation stories with varied lengths, blank text, and exact
+    overlap for evaluation provenance tests.
+    """
     return DatasetDict({
         "train": Dataset.from_dict({"text": ["a b", "f g", "h i"]}),
         "validation": Dataset.from_dict({"text": ["a b c d e", "f", "", "h i", "j"]}),
@@ -46,6 +49,10 @@ def quality_splits():
 
 
 def checkpoint_fixture(path, max_stories=3, *, training_device="cpu", precision="fp32"):
+    """Write a minimal evaluation checkpoint from a synthetic model and selected local
+    data. Return payload, model, and tokenizer; saved device/precision metadata can
+    be varied without training.
+    """
     tokenizer = fixture_tokenizer()
     loaders = create_dataloaders(quality_splits(), tokenizer, sequence_length=12,
                                 batch_size=2, max_stories=max_stories)
@@ -67,6 +74,9 @@ def checkpoint_fixture(path, max_stories=3, *, training_device="cpu", precision=
 
 
 def local_validation(**options):
+    """Prepare local validation only and attach requested revision metadata, replacing
+    the Hub loader in offline evaluation tests.
+    """
     revision = options.pop("revision")
     tokenizer_revision = options.pop("tokenizer_revision")
     result = create_validation_loader(quality_splits()["validation"], fixture_tokenizer(),
@@ -79,11 +89,17 @@ def local_validation(**options):
 
 class FixedLogits(nn.Module):
     def __init__(self, values, context=8):
+        """Store a fixed vocabulary-logit vector and synthetic context limit for
+        manually predictable evaluation and generation.
+        """
         super().__init__()
         self.values = nn.Parameter(torch.tensor(values, dtype=torch.float32))
         self.config = SimpleNamespace(sequence_length=context, vocab_size=len(values))
 
     def forward(self, ids, attention_mask=None):
+        """Broadcast fixed logits to [batch, sequence, vocabulary] and fail if
+        gradients are enabled, checking inference paths disable autograd.
+        """
         if torch.is_grad_enabled():
             raise AssertionError("Evaluation/generation must disable gradients")
         return self.values.expand(*ids.shape, -1)
@@ -91,15 +107,23 @@ class FixedLogits(nn.Module):
 
 class SingleThreadTests(unittest.TestCase):
     def setUp(self):
+        """Temporarily use one PyTorch CPU thread to reduce overhead and numerical
+        variation in synthetic evaluation tests.
+        """
         self.old_threads = torch.get_num_threads()
         torch.set_num_threads(1)
 
     def tearDown(self):
+        """Restore the original PyTorch thread count after each evaluation test."""
         torch.set_num_threads(self.old_threads)
 
 
 class ValidationLoaderTests(SingleThreadTests):
     def test_shared_preparation_matches_training_batches_and_provenance(self):
+        """Verify validation-only preparation matches training's validation tensors and
+        fingerprints across sample limits without auditing or preparing training
+        data.
+        """
         tokenizer = fixture_tokenizer()
         tokenizer.enable_padding(length=20, pad_id=1)
         tokenizer.enable_truncation(max_length=1)
@@ -126,6 +150,9 @@ class ValidationLoaderTests(SingleThreadTests):
         self.assertIsNotNone(tokenizer.truncation)
 
     def test_hub_loader_requests_only_validation_and_verifies_cache(self):
+        """Mock Hub access to check only validation is requested and its cached
+        revision is verified before use.
+        """
         split = quality_splits()["validation"]
         with tempfile.TemporaryDirectory() as directory:
             tokenizer_path = Path(directory) / "tokenizer.json"
@@ -145,6 +172,10 @@ class ValidationLoaderTests(SingleThreadTests):
                                                 tokenizer_revision=TOKENIZER_REVISION)
 
     def test_fresh_preparation_never_reads_train_and_preserves_builder_identity(self):
+        """Use local Parquet builders to verify fresh validation preparation never
+        reads an invalid training file, preserves identity, and reuses normal or
+        isolated offline caches.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             validation_path = root / "validation.parquet"
@@ -183,6 +214,9 @@ class ValidationLoaderTests(SingleThreadTests):
             self.assertEqual(fallback._fingerprint, result._fingerprint)
 
     def test_empty_and_invalid_validation_errors(self):
+        """Check blank/non-string validation data and invalid loader options fail with
+        clear errors.
+        """
         for texts, message in ((["", "  "], "no usable stories"),
                                ([None], "string text")):
             with self.subTest(texts=texts), self.assertRaisesRegex(ValueError, message):
@@ -192,6 +226,10 @@ class ValidationLoaderTests(SingleThreadTests):
                 create_validation_loader(quality_splits()["validation"], fixture_tokenizer(), **options)
 
     def test_loss_and_perplexity_match_manual_valid_token_calculation(self):
+        """Compare token-weighted loss and perplexity with a manual fixed-logit
+        calculation, including EOS, nonfinite loss rejection, mode restoration, and
+        JSON-safe perplexity overflow.
+        """
         values = [0.0, 1.5, -0.5, 2.0]
         model = FixedLogits(values)
         examples = [{"tokens": ids} for ids in ([2, 3, 1], [3, 1], [2, 2, 3, 1])]
@@ -220,6 +258,9 @@ class ValidationLoaderTests(SingleThreadTests):
 class GenerationTests(SingleThreadTests):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable; generation precision check skipped")
     def test_cuda_generation_in_supported_precisions(self):
+        """When CUDA is available, check generation in supported precisions produces
+        tokens without consuming the global device RNG.
+        """
         config = ModelConfig(vocab_size=12, sequence_length=12, layers=1,
                              d_model=12, heads=3, d_ff=24)
         model = DecoderOnlyTransformer(config).to("cuda")
@@ -234,6 +275,9 @@ class GenerationTests(SingleThreadTests):
                 torch.testing.assert_close(before, torch.cuda.get_rng_state(), rtol=0, atol=0)
 
     def test_greedy_context_limit_and_length_limit(self):
+        """Verify greedy continuation text, context-capacity and token-limit stopping,
+        and restoration of training/evaluation mode.
+        """
         model = FixedLogits([0, -10, 0, 5] + [0] * 8, context=4)
         result = generate(model, fixture_tokenizer(), "a", temperature=0, max_new_tokens=10)
         self.assertEqual(result["generated_tokens"], 3)
@@ -247,6 +291,9 @@ class GenerationTests(SingleThreadTests):
         self.assertFalse(model.training)
 
     def test_eos_and_no_special_tokens_in_decoded_text(self):
+        """Check generated EOS counts as a token and stops decoding while special
+        tokens are omitted from continuation and complete text.
+        """
         tokenizer = fixture_tokenizer()
         tokenizer.add_special_tokens(["<|endoftext|>"])
         model = FixedLogits([0, 5] + [0] * 10)
@@ -257,6 +304,10 @@ class GenerationTests(SingleThreadTests):
         self.assertEqual(result["text"], "a")
 
     def test_sampling_is_reproducible_and_does_not_consume_global_rng(self):
+        """Check repeated seeded sampling matches across full, oversized, and
+        restricted top-k settings, including tiny temperature, without changing
+        global RNG state.
+        """
         model = FixedLogits([0, -100] + [1] * 10, context=16)
         for top_k, temperature in ((0, 0.8), (999, 0.8), (3, 0.8), (1, 1e-300)):
             with self.subTest(top_k=top_k, temperature=temperature):
@@ -269,6 +320,9 @@ class GenerationTests(SingleThreadTests):
                 self.assertEqual(a, b)
 
     def test_invalid_prompts_options_and_nonfinite_logits(self):
+        """Verify invalid or context-filling prompts, bad sampling options, vocabulary
+        mismatches, enabled truncation, and nonfinite logits fail explicitly.
+        """
         model = FixedLogits([0] * 12, context=4)
         for prompt in ("", "  ", "a b c d", "a b c d e"):
             with self.subTest(prompt=prompt), self.assertRaises(ValueError):
@@ -294,6 +348,10 @@ class GenerationTests(SingleThreadTests):
 
 class CheckpointEvaluationTests(SingleThreadTests):
     def test_round_trip_inherits_selection_and_writes_default_report(self):
+        """Evaluate a local checkpoint and verify saved validation selection is
+        reproduced, default report artifacts are written, and checkpoint bytes
+        remain unchanged.
+        """
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "best.pt"
             payload, model, _ = checkpoint_fixture(checkpoint)
@@ -322,6 +380,9 @@ class CheckpointEvaluationTests(SingleThreadTests):
             self.assertEqual(before, checkpoint.read_bytes())
 
     def test_cli_overrides_full_split_and_custom_prompts(self):
+        """Exercise evaluation CLI overrides, checking full-validation selection and
+        custom prompts while generation seeds leave validation membership unchanged.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checkpoint_fixture(root / "latest.pt", training_device="cuda", precision="bf16")
@@ -350,6 +411,9 @@ class CheckpointEvaluationTests(SingleThreadTests):
                 self.assertIn(f"Complete text:\n{sample['text']}", saved_samples)
 
     def test_validation_metadata_rejects_changes(self):
+        """Check validation identity comparisons reject altered provenance/settings
+        while allowing the explicit full-validation selection contract.
+        """
         with tempfile.TemporaryDirectory() as directory:
             payload, _, _ = checkpoint_fixture(Path(directory) / "latest.pt")
             saved = payload["data_signature"]
@@ -370,6 +434,9 @@ class CheckpointEvaluationTests(SingleThreadTests):
             verify_validation_metadata(saved, full, full_validation=True)
 
     def test_invalid_checkpoint_and_options_fail_before_data_loading(self):
+        """Verify unsupported checkpoints and invalid evaluation options fail before
+        the validation loader is invoked.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             payload, _, _ = checkpoint_fixture(root / "latest.pt")
@@ -401,6 +468,9 @@ class CheckpointEvaluationTests(SingleThreadTests):
             self.assertFalse((root / "evaluations").exists())
 
     def test_skip_generation_output_protection_and_provenance_failure(self):
+        """Check metrics-only evaluation skips samples, occupied outputs are protected,
+        and changed validation provenance aborts evaluation.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checkpoint_fixture(root / "latest.pt")
@@ -429,6 +499,9 @@ class CheckpointEvaluationTests(SingleThreadTests):
             self.assertFalse((root / "failure").exists())
 
     def test_offline_subprocess_cli_with_local_hub_stubs(self):
+        """Run the evaluation entrypoint in a fresh process with local Hub stubs,
+        checking offline execution and generated artifacts without network access.
+        """
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)

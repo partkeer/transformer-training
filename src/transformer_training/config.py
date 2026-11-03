@@ -16,6 +16,9 @@ class ImplementationConfig:
     activation_checkpointing: bool = False
 
     def __post_init__(self):
+        """Reject unknown execution choices, nonboolean switches, and backend or
+        compile-mode settings that require an accompanying feature to be enabled.
+        """
         choices = {
             "attention": {"reference", "sdpa"},
             "sdpa_backend": {"auto", "math", "flash", "efficient", "cudnn"},
@@ -46,6 +49,9 @@ class ModelConfig:
     dropout: float = 0.1
 
     def __post_init__(self):
+        """Reject nonpositive dimensions, model width that cannot split evenly into
+        heads, or dropout outside [0, 1).
+        """
         for name in ("vocab_size", "sequence_length", "layers", "d_model", "heads", "d_ff"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be positive")
@@ -81,6 +87,10 @@ class TrainingConfig:
     validation_loss_targets: tuple[float, ...] = ()
 
     def __post_init__(self):
+        """Validate training counts, numerical ranges, device syntax, and precision
+        names. Store finite loss targets as a sorted unique tuple; hardware
+        availability is checked separately.
+        """
         for name in ("batch_size", "gradient_accumulation_steps", "epochs",
                      "eval_every", "checkpoint_every", "log_every"):
             if getattr(self, name) < 1:
@@ -117,4 +127,7 @@ class TrainingConfig:
 
     @property
     def effective_batch_size(self):
+        """Return batch size times accumulation steps, the nominal examples per update
+        before partial batches at an epoch boundary.
+        """
         return self.batch_size * self.gradient_accumulation_steps

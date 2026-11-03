@@ -9,6 +9,10 @@ from .checkpoint import atomic_json, atomic_text
 
 
 def write_report(report, output):
+    """Atomically write JSON and readable Markdown for benchmark, training, profile, or
+    imported evidence, including scope limitations and links to available raw
+    artifacts.
+    """
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     atomic_json(output / "report.json", report)
@@ -74,6 +78,10 @@ def write_report(report, output):
 
 
 def report_training(run_dir, output):
+    """Read invocation records and matching metrics, plot available validation
+    observations, and write a report. Keep invocation histories separate and reject
+    runs with no recorded measurements instead of reconstructing historical timing.
+    """
     run_dir, output = Path(run_dir), Path(output)
     paths = sorted((run_dir / "invocations").glob("*/measurement.json"))
     if not paths:
@@ -116,6 +124,10 @@ def report_training(run_dir, output):
 
 
 def main(argv=None):
+    """Parse a training-report command, validate a fresh destination, and generate
+    artifacts without executing training. Return zero on success or report a CLI
+    error.
+    """
     parser = argparse.ArgumentParser(description="Report new instrumented training runs", allow_abbrev=False)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path)

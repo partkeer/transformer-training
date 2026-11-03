@@ -29,12 +29,19 @@ CHECKPOINT_VERSION = 1
 class NumericalFailure(FloatingPointError):
     """Keep the existing exception contract while identifying the numerical failure."""
     def __init__(self, kind, message):
+        """Attach a machine-readable failure kind to a floating-point exception while
+        retaining its human-readable error message.
+        """
         super().__init__(message)
         self.kind = kind
 
 
 def validate_output_directory(output_dir, *, resume=None):
-    """Reject invalid paths before data preparation, without creating anything."""
+    """Reject file paths, file-valued parents, and occupied fresh-run directories.
+
+    Resume may reuse an existing directory. Check before data preparation and
+    create no files or directories here.
+    """
     output = Path(output_dir)
     if output.exists():
         if not output.is_dir():
@@ -49,7 +56,12 @@ def validate_output_directory(output_dir, *, resume=None):
 
 
 def validate_resume_settings(payload, model_config, config, implementation=None, *, diagnostic=False):
-    """Check compatibility that does not depend on preparing the dataset."""
+    """Reject incompatible checkpoint versions, model, or training settings.
+
+    Allow the explicitly listed operational overrides; diagnostic runs may
+    additionally change precision and implementation. Dataset identity is checked
+    separately after preparation.
+    """
     if payload["version"] != CHECKPOINT_VERSION:
         raise ValueError("Unsupported checkpoint version")
     current = asdict(config)
@@ -89,6 +101,10 @@ def clip_gradients(parameters, max_norm, *, allow_nonfinite_gradients=False):
 
 
 def validate_device(config):
+    """Return the requested torch device after checking CUDA availability, index, and
+    native BF16 support. Reject mixed precision on CPU rather than silently
+    substituting another execution mode.
+    """
     device = torch.device(config.device)
     if device.type == "cuda":
         if not torch.cuda.is_available():
@@ -107,6 +123,10 @@ def validate_device(config):
 
 
 def seed_everything(seed):
+    """Seed Python and PyTorch CPU/CUDA generators and configure IEEE FP32 math without
+    cuDNN autotuning. These settings support reproducible comparisons but do not
+    promise cross-platform bitwise identity.
+    """
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -122,11 +142,17 @@ class EpochSampler(Sampler):
     """Epoch permutation sliced at the trainer's consumed cursor, never prefetch state."""
 
     def __init__(self, size, seed, epoch, start=0):
+        """Store dataset size, base seed, epoch, and consumed-example cursor; reject a
+        cursor outside the dataset.
+        """
         if not 0 <= start <= size:
             raise ValueError("Consumed cursor is outside the dataset")
         self.size, self.seed, self.epoch, self.start = size, seed, epoch, start
 
     def __iter__(self):
+        """Return the epoch's seeded permutation starting at the consumed cursor,
+        independently of global RNG state or how far DataLoader workers prefetched.
+        """
         generator = torch.Generator().manual_seed((self.seed + self.epoch) % 2**63)
         order = torch.randperm(self.size, generator=generator)
         # Tensor iteration unbinds millions of scalar tensors at once. A Python
@@ -134,6 +160,9 @@ class EpochSampler(Sampler):
         return iter(order[self.start:].tolist())
 
     def __len__(self):
+        """Return the number of examples remaining after the consumed cursor, including
+        any final partial batch.
+        """
         return self.size - self.start
 
 
@@ -141,6 +170,9 @@ class WarmupCosine:
     """LR for the next successful update; skipped FP16 updates keep the same LR."""
 
     def __init__(self, optimizer, config, total_updates):
+        """Create a schedule over a positive number of successful updates and
+        immediately apply the rate for the first update.
+        """
         if total_updates < 1:
             raise ValueError("Schedule requires at least one update")
         self.optimizer, self.config = optimizer, config
@@ -149,6 +181,10 @@ class WarmupCosine:
         self._apply()
 
     def learning_rate(self, index):
+        """Return the rate for a zero-based update index: optional linear warm-up
+        followed by cosine decay. A single-update run uses the peak rate; indices at
+        or beyond the final update use the minimum rate.
+        """
         c, total = self.config, self.total_updates
         if total == 1:
             return c.learning_rate
@@ -162,17 +198,29 @@ class WarmupCosine:
             1 + math.cos(math.pi * progress))
 
     def _apply(self):
+        """Set every optimiser parameter group's learning rate for the next successful
+        update without advancing the schedule.
+        """
         for group in self.optimizer.param_groups:
             group["lr"] = self.learning_rate(self.completed_updates)
 
     def step(self):
+        """Advance the successful-update counter once and apply the next rate; callers
+        omit this when AMP skips an update.
+        """
         self.completed_updates += 1
         self._apply()
 
     def state_dict(self):
+        """Return the completed-update count and fixed horizon needed to resume the
+        learning-rate trajectory.
+        """
         return {"completed_updates": self.completed_updates, "total_updates": self.total_updates}
 
     def load_state_dict(self, state):
+        """Restore the completed-update count and current rate, rejecting a checkpoint
+        whose schedule horizon differs from this run.
+        """
         if state["total_updates"] != self.total_updates:
             raise ValueError("Checkpoint schedule horizon changed")
         self.completed_updates = state["completed_updates"]
@@ -181,6 +229,10 @@ class WarmupCosine:
 
 def make_optimizer(model, config, implementation=None):
     # model.parameters() removes aliases, so tied embeddings appear only once.
+    """Return AdamW with weight decay on matrices and embeddings but none on biases or
+    normalisation vectors. Deduplicate tied parameters through model.parameters()
+    and use the requested standard, foreach, or fused implementation.
+    """
     decay, no_decay = [], []
     for parameter in model.parameters():
         (decay if parameter.ndim >= 2 else no_decay).append(parameter)
@@ -194,7 +246,13 @@ def make_optimizer(model, config, implementation=None):
 
 def accumulate_gradients(model, batches, *, device="cpu", precision="fp32", scaler=None,
                          phases=None):
-    """Backpropagate sum(losses) / sum(valid targets) without retaining microbatch graphs."""
+    """Accumulate gradients weighted by all supervised tokens in the batch group.
+
+    Divide each microbatch's summed loss by the group's total valid-target count,
+    so short or padded batches are not overweighted. Optionally scale for AMP,
+    reject empty/nonfinite objectives, and return loss/token/example statistics
+    without retaining microbatch graphs. The caller clears gradients and steps.
+    """
     phases = phases or Phases()
     with phases.range("data_preparation"):
         tokens = sum(int((batch["labels"] != IGNORE_INDEX).sum()) for batch in batches)
@@ -220,7 +278,13 @@ def accumulate_gradients(model, batches, *, device="cpu", precision="fp32", scal
 
 
 def optimizer_attempt(model, optimizer, scaler, scheduler, batches, config, device, *, phases=None):
-    """The single update path used by training, benchmarks, and every profiler."""
+    """Attempt one shared accumulated optimiser update and return its statistics.
+
+    Clear gradients, backpropagate token-weighted loss, unscale and clip, then
+    invoke the scaler/optimiser. Advance the schedule only when AMP applies the
+    update; return skip/scale metadata so callers account for consumed work.
+    Training, benchmarks, and profilers all use this path.
+    """
     phases = phases or Phases()
     with phases.range("zero_grad"):
         optimizer.zero_grad(set_to_none=True)
@@ -245,6 +309,9 @@ def optimizer_attempt(model, optimizer, scaler, scheduler, batches, config, devi
 
 def data_signature(metadata):
     # Worker and hardware settings may change on resume; corpus identity may not.
+    """Extract corpus, tokenizer, selection, and preprocessing identity for checkpoint
+    compatibility while leaving operational worker and hardware settings out.
+    """
     keys = ("dataset", "revision", "tokenizer", "tokenizer_revision", "sequence_length",
             "max_stories", "seed", "vocab_size", "eos_id", "pad_id", "ignore_index",
             "exclude_validation_overlap", "policy", "splits", "audit")
@@ -252,6 +319,10 @@ def data_signature(metadata):
 
 
 def environment(device):
+    """Return software versions, source identity, precision controls, and device
+    details for interpreting measurements. Include CUDA GPU properties and attempt
+    to read the driver version; an unavailable driver query yields None.
+    """
     result = {
         "python": platform.python_version(), "platform": platform.platform(),
         "packages": {name: str(importlib.metadata.version(name)) for name in
@@ -288,6 +359,11 @@ class Trainer:
     def __init__(self, model_config: ModelConfig, config: TrainingConfig, loaders,
                  output_dir, *, resume=None, preparation_seconds=None, diagnostic=False,
                  implementation=None):
+        """Validate prepared loaders and execution settings, create run artifacts, and
+        construct the model, optimiser, scheduler, scaler, and counters. Optionally
+        restore a compatible checkpoint while deferring RNG restoration until loader
+        setup.
+        """
         self.invocation = Invocation(config.timing_warmup_steps)
         self.preparation_seconds = preparation_seconds
         self.diagnostic = diagnostic
@@ -358,6 +434,10 @@ class Trainer:
                     self.invocation.snapshot())
 
     def _restore(self, path):
+        """Restore compatible model, optimiser, schedule, scaler, counters, and
+        measurement history. Verify data identity and counter bounds, and defer RNG
+        restoration so iterator setup cannot disturb resumed dropout state.
+        """
         payload = load_checkpoint(path)
         validate_resume_settings(payload, self.model_config, self.config, self.implementation,
                                  diagnostic=self.diagnostic)
@@ -385,6 +465,10 @@ class Trainer:
             raise ValueError("Invalid checkpoint counters")
 
     def _log(self, record, *, console=True):
+        """Append a JSON metrics record tagged with the current update and invocation,
+        optionally also printing it. Reject nonfinite JSON values to keep artifacts
+        machine-readable.
+        """
         record = dict(record, updates=self.state["updates"], measurement_version=1,
                       invocation_id=self.invocation.id)
         with (self.output_dir / "metrics.jsonl").open("a", encoding="utf-8") as stream:
@@ -393,10 +477,17 @@ class Trainer:
             print(json.dumps(record, allow_nan=False), flush=True)
 
     def _sync(self):
+        """Wait for outstanding work on this trainer's CUDA device; do nothing for CPU
+        execution.
+        """
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
     def _checkpoint(self, name):
+        """Synchronise and atomically save complete resumable state under the supplied
+        filename, including RNG, data cursor, and measurement history. Call only at
+        accumulation boundaries and log checkpoint duration separately.
+        """
         self._sync()
         start = time.perf_counter()
         save_checkpoint(self.output_dir / name, {
@@ -417,6 +508,10 @@ class Trainer:
                    "checkpoint_seconds": time.perf_counter() - start})
 
     def _validate(self):
+        """Evaluate token-weighted validation loss, record first crossings of quality
+        targets, and save best.pt when loss improves. Return the evaluator result
+        and log validation time outside training-attempt timing.
+        """
         self._sync()
         start = time.perf_counter()
         result = evaluate(self.model, self.loaders.validation,
@@ -446,6 +541,10 @@ class Trainer:
         return result
 
     def _epoch_loader(self):
+        """Return a loader for the current epoch starting at the consumed cursor. Use
+        separate seeded sampler and worker generators so prefetch and iterator setup
+        do not alter resumed training order or dropout RNG.
+        """
         c, state = self.config, self.state
         return DataLoader(
             self.loaders.train.dataset, batch_size=c.batch_size,
@@ -458,6 +557,10 @@ class Trainer:
         )
 
     def fit(self, *, stop_after_updates=None):
+        """Run training with device-memory sampling and return the final summary.
+        Record failed measurements before re-raising errors, always stop sampling,
+        and allow an optional successful-update cap for orderly interruption tests.
+        """
         self.memory_sampler.start()
         try:
             return self._fit(stop_after_updates=stop_after_updates)
@@ -476,6 +579,10 @@ class Trainer:
 
     def _finish_measurements(self, status, *, error=None):
         # End the lifecycle clock before measurement/report serialization.
+        """Close the invocation measurement window, stop memory sampling, and write
+        artifacts for the given status. Preserve unavailable values explicitly and
+        collect optional attention-dispatch evidence after timing has ended.
+        """
         result = self.invocation.snapshot(status=status)
         result.update(preparation_seconds=self.preparation_seconds, error=error,
                       execution=execution_report(self.model),
@@ -509,6 +616,11 @@ class Trainer:
         return result
 
     def _fit(self, *, stop_after_updates=None):
+        """Execute accumulated attempts until the epoch, update, or processed-token
+        budget is reached. Advance the consumed cursor even on AMP skips, validate
+        and checkpoint at boundaries, and return a persisted summary; the last
+        accumulation group can exceed the token budget.
+        """
         c, state = self.config, self.state
         self.model.train()
         interval = {"loss_sum": 0.0, "tokens": 0, "slots": 0, "seconds": 0.0,

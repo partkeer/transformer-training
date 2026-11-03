@@ -13,6 +13,10 @@ from .config import ImplementationConfig
 
 
 def add_implementation_arguments(parser, *, evaluation=False):
+    """Add attention, backend, and compilation options to a parser, plus
+    optimiser/checkpointing switches for training. Leave defaults unset so omitted
+    flags can inherit checkpoint settings.
+    """
     parser.add_argument("--attention", choices=("reference", "sdpa"))
     parser.add_argument("--sdpa-backend", choices=("auto", "math", "flash", "efficient", "cudnn"))
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None)
@@ -24,6 +28,11 @@ def add_implementation_arguments(parser, *, evaluation=False):
 
 
 def resolve_implementation(args, saved=None):
+    """Return validated execution settings by combining saved values with explicit
+    flags. Choosing reference attention or disabling compilation also clears
+    incompatible inherited backend or compile-mode settings unless explicitly
+    overridden.
+    """
     values = dict((saved or {}).get("implementation_config", {}))
     for field in fields(ImplementationConfig):
         value = getattr(args, field.name, None)
@@ -38,6 +47,9 @@ def resolve_implementation(args, saved=None):
 
 
 def optimizer_flags(implementation):
+    """Return explicit foreach and fused flags for the requested AdamW implementation,
+    disabling both for the standard path.
+    """
     return {"foreach": implementation.optimizer_implementation == "foreach",
             "fused": implementation.optimizer_implementation == "fused"}
 
@@ -66,6 +78,9 @@ def configure_restored_optimizer(optimizer, implementation):
 
 
 def file_sha256(path):
+    """Return a file's SHA-256 checksum using bounded chunks, allowing large checkpoint
+    and artifact identities without loading the whole file into memory.
+    """
     checksum = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -74,6 +89,10 @@ def file_sha256(path):
 
 
 def compiler_snapshot(enabled):
+    """Return JSON-safe compiler events when telemetry is available, or an explicit
+    disabled/unavailable status. Missing telemetry is not evidence that an interval
+    contains no compilation.
+    """
     if not enabled:
         return {"status": "disabled", "events": []}
     try:
@@ -95,10 +114,16 @@ def compiler_snapshot(enabled):
 
 
 def compilation_changed(before, after):
+    """Return whether compiler status or event contents changed between snapshots,
+    identifying intervals that may include compilation work.
+    """
     return before["status"] != after["status"] or before["events"] != after["events"]
 
 
 def execution_report(model):
+    """Return requested execution settings, compile-wrapper time, compiler telemetry,
+    and observed attention evidence; label uncaptured SDPA dispatch as unverified.
+    """
     return {"requested": asdict(model.implementation),
             "compile_wrapper_seconds": model.compile_wrapper_seconds,
             "compiler": compiler_snapshot(model.implementation.compile),

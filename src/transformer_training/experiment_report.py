@@ -8,6 +8,11 @@ from .checkpoint import atomic_json, atomic_text
 
 
 def paired_quality(candidate, reference, quality):
+    """Compare candidate and reference loss per seed, checking equal work, budget
+    coverage, skipped updates, and validation identity. Report loss differences
+    against an optional margin only for eligible pairs; do not infer statistical
+    equivalence.
+    """
     pairs = []
     for seed in quality["seeds"]:
         a, b = reference.get(str(seed)), candidate.get(str(seed))
@@ -34,6 +39,10 @@ def paired_quality(candidate, reference, quality):
 
 
 def write_suite_report(output, report):
+    """Atomically write JSON, CSV, and Markdown views of a report into the existing
+    output directory, preserving missing metrics and linking raw evidence and
+    incomplete jobs.
+    """
     atomic_json(output / "report.json", report)
     columns = ["variant", "reference", "status", "changes", "observed_backends", "useful_tokens_per_second",
         "processed_tokens_per_second", "throughput_stddev", "median_update_seconds", "p95_update_seconds",
@@ -49,6 +58,9 @@ def write_suite_report(output, report):
         "| Variant | Control | Status | Tokens/s | Update ms | Peak allocated MiB | Speedup | Memory reduction | Backends |",
         "|---|---|---|---:|---:|---:|---:|---:|---|"]
     def display(value, scale=1):
+        """Format a numeric metric with an optional unit scale, or render None as
+        unavailable rather than zero.
+        """
         return "unavailable" if value is None else f"{value * scale:.3f}"
     for row in report["rows"]:
         writer.writerow({key: json.dumps(row.get(key)) if isinstance(row.get(key), (list, dict)) else row.get(key)

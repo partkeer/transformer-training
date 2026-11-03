@@ -15,6 +15,10 @@ from .implementations import resolve_implementation
 
 
 def resolve_request(args, argv):
+    """Resolve CLI and optional checkpoint settings into a serialisable request without
+    loading data or initialising CUDA. Inherit unspecified saved options and reject
+    incompatible explicit model, training, or data changes.
+    """
     from .checkpoint import load_checkpoint
     from .training import validate_resume_settings
 
@@ -54,6 +58,10 @@ def resolve_request(args, argv):
 
 
 def worker(request):
+    """Configure offline mode, prepare data, build an isolated trainer, and execute one
+    resolved trial request. Write completion/failure status for trial execution and
+    return its result.
+    """
     if request["offline"]:
         os.environ["HF_HUB_OFFLINE"] = os.environ["HF_DATASETS_OFFLINE"] = "1"
     from .checkpoint import atomic_json
@@ -82,6 +90,10 @@ def worker(request):
 
 
 def launch_worker(request, output, *, timeout=1800):
+    """Write a request in a new directory and launch a bounded fresh Python worker with
+    isolated compiler caches and a captured log. Return trial result and command, or
+    raise with timeout/failure context.
+    """
     from .checkpoint import atomic_json
     from .subprocesses import run_bounded
 
@@ -107,6 +119,11 @@ def launch_worker(request, output, *, timeout=1800):
 
 
 def main(kind="benchmark", argv=None):
+    """Parse benchmark/profile commands and return an exit status after running
+    isolated trials, importing captures, or printing a side-effect-free dry-run
+    request. Protect occupied destinations and keep profiler captures separate from
+    benchmark statistics.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     parser.description = "Repeated complete-update benchmarks" if kind == "benchmark" else "Separate short profiling captures"

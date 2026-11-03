@@ -6,6 +6,9 @@ import sqlite3
 
 
 def union(intervals):
+    """Return sorted merged positive-length intervals, combining overlaps and touching
+    endpoints while ignoring empty or reversed intervals.
+    """
     result = []
     for start, end in sorted((a, b) for a, b in intervals if b > a):
         if result and start <= result[-1][1]:
@@ -16,10 +19,16 @@ def union(intervals):
 
 
 def duration(intervals):
+    """Return total covered interval length after merging overlaps so concurrent work
+    is not counted twice.
+    """
     return sum(b - a for a, b in union(intervals))
 
 
 def intersection(left, right):
+    """Return positive-length overlaps between two interval collections after merging
+    each collection independently.
+    """
     left, right = union(left), union(right)
     result, i, j = [], 0, 0
     while i < len(left) and j < len(right):
@@ -34,6 +43,9 @@ def intersection(left, right):
 
 
 def subtract(windows, busy):
+    """Return portions of measurement windows not covered by any busy interval,
+    preserving gaps without double-counting overlapping windows.
+    """
     remaining = []
     for start, end in union(windows):
         cursor = start
@@ -49,6 +61,11 @@ def subtract(windows, busy):
 
 
 def analyse_trace(events):
+    """Summarise complete Chrome/CUPTI events in microseconds within explicit
+    training/update ranges. Compute overlap-aware GPU activity and correlate
+    launches to host phases; report missing ranges or kernels and treat gap overlaps
+    as candidates rather than causal proof.
+    """
     events = [e for e in events if e.get("ph") == "X" and e.get("dur", 0) >= 0]
     intervals = lambda rows: [(e["ts"], e["ts"] + e["dur"]) for e in rows]
     windows = intervals([e for e in events if e.get("name") == "training/update"])
@@ -125,6 +142,9 @@ def analyse_trace(events):
 
 
 def load_chrome(path):
+    """Read Chrome trace JSON and return its event list, accepting either a traceEvents
+    object or a bare list and rejecting malformed containers.
+    """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     events = data.get("traceEvents") if isinstance(data, dict) else data
     if not isinstance(events, list):
@@ -133,7 +153,12 @@ def load_chrome(path):
 
 
 def load_nsys_sqlite(path):
-    """Read the documented CUPTI/NVTX tables; unknown schemas fail explicitly."""
+    """Read CUPTI/NVTX tables from a read-only Nsight Systems SQLite export.
+
+    Return Chrome-style complete events in microseconds, resolving string IDs
+    and retaining launch correlations. Reject exports missing required tables
+    and always close the database connection.
+    """
     connection = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:

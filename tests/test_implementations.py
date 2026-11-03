@@ -29,6 +29,9 @@ from test_training import synthetic_loaders
 
 class ImplementationTests(unittest.TestCase):
     def setUp(self):
+        """Save thread settings and create seeded small CPU model/training
+        configurations for controlled implementation comparisons.
+        """
         self.threads = torch.get_num_threads()
         torch.set_num_threads(1)
         torch.manual_seed(23)
@@ -38,9 +41,13 @@ class ImplementationTests(unittest.TestCase):
             epochs=3, num_workers=0, timing_warmup_steps=1, log_every=10)
 
     def tearDown(self):
+        """Restore the original PyTorch thread count after each implementation test."""
         torch.set_num_threads(self.threads)
 
     def test_sdpa_matches_valid_logits_loss_and_gradients(self):
+        """Compare math SDPA with reference attention on short and padded inputs,
+        checking valid logits, causality, accumulated loss, and gradients.
+        """
         reference = DecoderOnlyTransformer(self.model)
         sdpa = DecoderOnlyTransformer(self.model, ImplementationConfig(attention="sdpa", sdpa_backend="math"))
         sdpa.load_state_dict(reference.state_dict())
@@ -63,6 +70,9 @@ class ImplementationTests(unittest.TestCase):
             sdpa(torch.tensor([[2, 3]]), torch.tensor([[False, True]]))
 
     def test_sdpa_eval_disables_attention_and_residual_dropout(self):
+        """Verify repeated SDPA evaluation outputs match with nonzero configured
+        dropout, confirming inference disables both dropout paths.
+        """
         model = DecoderOnlyTransformer(replace(self.model, dropout=.5),
             ImplementationConfig(attention="sdpa", sdpa_backend="math"))
         ids = torch.tensor([[2, 3, 4]])
@@ -72,11 +82,17 @@ class ImplementationTests(unittest.TestCase):
         self.assertFalse(torch.equal(model(ids), model(ids)))
 
     def test_unsupported_requested_backend_is_not_substituted(self):
+        """Check an explicitly requested unsupported attention backend raises rather
+        than silently falling back to a different implementation.
+        """
         model = DecoderOnlyTransformer(self.model, ImplementationConfig(attention="sdpa", sdpa_backend="cudnn"))
         with self.assertRaises(RuntimeError):
             model(torch.tensor([[2, 3]]))
 
     def test_checkpointing_preserves_dropout_gradients_and_rng(self):
+        """Compare activation-checkpointed and ordinary execution with dropout,
+        verifying gradients and subsequent RNG state match.
+        """
         for attention in ("reference", "sdpa"):
             with self.subTest(attention=attention):
                 impl = ImplementationConfig(attention=attention)
@@ -97,6 +113,9 @@ class ImplementationTests(unittest.TestCase):
                     checked(torch.tensor([[2, 3]]))
 
     def test_optimizer_variants_preserve_groups_and_updates(self):
+        """Compare standard, foreach, and fused AdamW on synthetic updates, checking
+        resulting parameters and optimiser moments under the same grouping policy.
+        """
         reference = DecoderOnlyTransformer(self.model)
         state = deepcopy(reference.state_dict())
         outcomes = []
@@ -120,6 +139,10 @@ class ImplementationTests(unittest.TestCase):
                     torch.testing.assert_close(entry[moment], outcomes[0][1]["state"][key][moment], atol=1e-8, rtol=1e-5)
 
     def test_checkpoint_resume_and_diagnostic_overrides(self):
+        """Verify checkpoints record implementation settings, normal resume rejects
+        incompatible changes, and diagnostic overrides preserve training state while
+        changing optimiser execution flags.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             root = Path(directory)
             impl = ImplementationConfig(attention="sdpa", sdpa_backend="math", optimizer_implementation="foreach")
@@ -138,6 +161,10 @@ class ImplementationTests(unittest.TestCase):
             self.assertEqual(restored.checkpoint_sha256, file_sha256(root / "run" / "latest.pt"))
 
     def test_diagnostic_fused_restore_casts_step_and_preserves_moments(self):
+        """Restore optimiser state across standard/fused diagnostic paths, checking
+        step-counter placement/dtype and moment preservation, then execute a further
+        update.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             root = Path(directory)
             trainer = Trainer(self.model, self.training, synthetic_loaders(), root / "run")
@@ -167,9 +194,16 @@ class ImplementationTests(unittest.TestCase):
             self.assertEqual(standard.state["updates"], 2)
 
     def test_sdpa_evidence_and_declared_comparison(self):
+        """Capture math-SDPA dispatch evidence and verify benchmark comparison requires
+        declared implementation changes while rejecting unrelated workload
+        differences.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             root = Path(directory)
             def trial(name, impl):
+                """Run one isolated synthetic trial with the supplied implementation in
+                its own directory and return its benchmark and dispatch evidence.
+                """
                 trainer = Trainer(self.model, self.training, synthetic_loaders(), root / name, implementation=impl)
                 return run_trial(trainer, warmup=1, measured=2)
             a = aggregate_trials([trial("ref", ImplementationConfig())])
@@ -188,9 +222,17 @@ class ImplementationTests(unittest.TestCase):
     def test_compile_boundary_and_state_dict_with_aot_eager(self):
         # AOT eager verifies Dynamo/AOT capture and backward without requiring a
         # local C++/CUDA codegen toolchain. This is not an Inductor speed test.
+        """Use AOT eager to check graph capture, backward agreement, stable state-dict
+        keys, input validation, and shape/mode transitions without requiring
+        Inductor code generation or measuring speed.
+        """
         self.addCleanup(torch.compiler.reset)
         actual_compile = torch.compile
         def compile_for_test(function, **options):
+            """Assert the production compile request uses full-graph Inductor, then
+            substitute AOT eager to test graph capture without a local code-
+            generation toolchain.
+            """
             self.assertEqual(options["backend"], "inductor")
             self.assertTrue(options["fullgraph"])
             return actual_compile(function, backend="aot_eager", fullgraph=True)
@@ -222,6 +264,9 @@ class ImplementationTests(unittest.TestCase):
                 self.assertEqual(compiler_snapshot(True)["status"], "available")
 
     def test_compilation_in_measured_interval_is_ineligible(self):
+        """Inject changing compiler telemetry and verify measured compilation
+        disqualifies both trial and aggregate benchmark comparisons.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             trainer = Trainer(self.model, self.training, synthetic_loaders(), Path(directory) / "trial")
             snapshots = iter({"status": "available", "events": list(range(n))} for n in (0, 1, 1, 2))
@@ -233,6 +278,9 @@ class ImplementationTests(unittest.TestCase):
             self.assertEqual(compare_results(report, report)["status"], "timings_ineligible")
 
     def test_compile_modes_errors_and_validation_remain_explicit(self):
+        """Check each compile mode reaches the wrapper unchanged, invalid masks fail
+        before graph execution, and compiler failures propagate explicitly.
+        """
         for mode in ("default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"):
             with self.subTest(mode=mode), patch("torch.compile") as compile:
                 compile.return_value.side_effect = RuntimeError("compiler failed")
@@ -248,6 +296,10 @@ class ImplementationTests(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable; GPU implementation acceptance not verified")
 class CudaImplementationTests(unittest.TestCase):
     def test_amp_sdpa_checkpointing_and_fused_overflow_recovery(self):
+        """When CUDA is available, check FP16 overflow skipping/recovery across
+        optimiser variants with SDPA and checkpointing, plus finite native-BF16
+        gradients where supported.
+        """
         model_config = ModelConfig(vocab_size=12, sequence_length=4, layers=1,
                                    d_model=32, heads=4, d_ff=64, dropout=.1)
         batches = list(synthetic_loaders().train)[:2]
@@ -278,6 +330,10 @@ class CudaImplementationTests(unittest.TestCase):
             self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters()))
 
     def test_inductor_modes_forward_backward_and_partial_batch(self):
+        """When CUDA is available, compare real Inductor modes with reference
+        forward/backward results for full and partial batch shapes, isolating
+        compiler state between modes.
+        """
         self.addCleanup(torch.compiler.reset)
         config = ModelConfig(vocab_size=12, sequence_length=4, layers=1,
                              d_model=32, heads=4, d_ff=64, dropout=0)
@@ -304,6 +360,9 @@ class CudaImplementationTests(unittest.TestCase):
 
 class PlanTests(unittest.TestCase):
     def plan(self):
+        """Return a minimal CPU suite with reference and foreach variants and one
+        explicitly declared experimental change.
+        """
         return {"version": 1, "shared": {"training": {"device": "cpu"}},
                 "benchmark": {"repeats": 1, "warmup": 1, "measured": 1},
                 "variants": [{"id": "reference"}, {"id": "foreach", "reference": "reference",
@@ -311,6 +370,10 @@ class PlanTests(unittest.TestCase):
                     "changes": ["implementation.optimizer_implementation"]}]}
 
     def test_plan_rejects_unsafe_ambiguous_or_uncontrolled_settings(self):
+        """Check resolved defaults and rejection of unsafe/duplicate IDs, bad
+        references, undeclared changes, invalid protocols, symbolic revisions, and
+        duplicate JSON keys.
+        """
         plan = self.plan()
         resolved = resolve_plan(plan)
         self.assertEqual(resolved["shared"]["training"]["precision"], "fp32")
@@ -338,6 +401,9 @@ class PlanTests(unittest.TestCase):
                 load_plan(path)
 
     def test_suite_and_diagnostic_dry_runs_have_no_side_effects(self):
+        """Run suite/diagnostic entrypoints in subprocesses and verify dry-run creates
+        no outputs, imports no data libraries, and leaves CUDA uninitialised.
+        """
         for command in (["scripts/run_experiments.py", "--plan", "experiments/implementations.json"],
                         ["scripts/benchmark_training.py", "--compile", "--attention", "sdpa"]):
             with tempfile.TemporaryDirectory() as directory:
@@ -351,6 +417,9 @@ class PlanTests(unittest.TestCase):
                 self.assertFalse(output.exists())
 
     def test_quality_pairs_flag_mismatched_work_and_require_margin(self):
+        """Verify paired quality checks equal applied work and reports a margin
+        decision only when an explicit degradation margin exists.
+        """
         quality = {"seeds": [42], "supervised_token_budget": 100}
         result = {"processed_tokens": 110, "applied_tokens": 110, "skipped_updates": 0,
                   "validation_identity": "same", "loss": 2.0, "budget_overshoot": 10}
@@ -364,6 +433,10 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(paired_quality(b, a, quality)["pairs"][0]["status"], "conditions_differ")
 
     def test_real_suite_processes_failures_resume_and_manifest(self):
+        """Run fresh workers on stubbed local data, retaining unsupported-variant
+        failures. Check resume skips completed jobs, retries failures, and rejects
+        changed plans or artifact checksums.
+        """
         plan = self.plan()
         plan["shared"].update(model={"vocab_size": 12, "sequence_length": 4, "layers": 1,
             "d_model": 12, "heads": 3, "d_ff": 24, "dropout": 0}, offline=True)
@@ -400,6 +473,10 @@ class PlanTests(unittest.TestCase):
                     run_suite(resolved, output, resume=True)
 
     def test_quality_suite_subprocess_and_interrupted_job_resume(self):
+        """Run a local-data quality suite in subprocesses, then simulate interruption
+        and verify retry reuses its saved training checkpoint and preserves loss and
+        token counts.
+        """
         plan = self.plan()
         plan["shared"].update(model={"vocab_size": 12, "sequence_length": 4, "layers": 1,
             "d_model": 12, "heads": 3, "d_ff": 24, "dropout": 0}, offline=True)

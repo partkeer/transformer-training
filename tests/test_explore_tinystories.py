@@ -5,6 +5,9 @@ from scripts.explore_tinystories import analyse, describe
 
 class AnalysisTests(unittest.TestCase):
     def test_missing_empty_duplicates_and_word_definition(self):
+        """Check EDA distinguishes null, invalid, blank, and duplicate text and counts
+        apostrophe-containing regex words separately from characters.
+        """
         rows = [{"text": text} for text in
                 (None, 12, "", "  ", "Lily can't fly.", "Lily can't fly.")]
         summary, hashes, chars, lengths = analyse(rows)
@@ -19,6 +22,9 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(len(hashes), 3)
 
     def test_empty_input_and_quantiles(self):
+        """Verify empty analysis returns absent length statistics and a simple nonempty
+        sequence produces the expected median and mean.
+        """
         summary, hashes, chars, lengths = analyse([])
         self.assertIsNone(summary["words"])
         self.assertEqual(summary["analysed_rows"], 0)

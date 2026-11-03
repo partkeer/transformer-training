@@ -27,6 +27,10 @@ TENSOR_METRICS = [f"sm__ops_path_tensor_src_{src}_dst_{dst}_sparsity_off.sum"
 
 
 def normalize(value, unit):
+    """Parse a finite Nsight CSV value, remove thousands separators, and convert
+    supported time, byte, and rate units to base units. Preserve percentages and
+    reject unknown units.
+    """
     value = float(value.replace(",", ""))
     if not math.isfinite(value):
         raise ValueError("Nonfinite Nsight metric")
@@ -40,6 +44,11 @@ def normalize(value, unit):
 
 
 def parse_ncu_csv(text):
+    """Parse per-launch Nsight Compute metrics into normalised kernel records,
+    retaining raw rows and marking invalid metrics unavailable. Derive traffic,
+    bandwidth, and supported arithmetic rates; bottleneck labels are heuristic
+    candidates, not proven diagnoses.
+    """
     lines = text.splitlines()
     header = next((i for i, line in enumerate(lines) if "Metric Name" in line and "Metric Value" in line), None)
     if header is None:
@@ -96,7 +105,12 @@ def parse_ncu_csv(text):
 
 
 def run_tool(arguments, *, timeout=1800, stdout_path=None):
-    """Bound captures and preserve errors; never alter privileges or invoke a shell."""
+    """Run an installed NVIDIA tool with a timeout and return structured evidence.
+
+    Optionally save stdout, and distinguish missing executables, denied counter
+    access, and failed captures. Preserve command/error details without changing
+    privileges or invoking a shell.
+    """
     if not shutil.which(arguments[0]):
         return unavailable(arguments[0] + " is not installed", "missing_tool")
     try:
@@ -113,6 +127,10 @@ def run_tool(arguments, *, timeout=1800, stdout_path=None):
 
 
 def capture_systems(command, directory, *, timeout=1800):
+    """Run a bounded Nsight Systems capture and SQLite export in the directory, then
+    return overlap-aware timeline analysis and artifact paths or an explicit
+    failure.
+    """
     directory = Path(directory)
     prefix = directory / "systems"
     result = run_tool(["nsys", "profile", "--trace=cuda,nvtx", "--sample=none",
@@ -133,6 +151,11 @@ def capture_systems(command, directory, *, timeout=1800):
 
 
 def capture_compute(command, directory, kernels, *, followup=False, timeout=1800):
+    """Capture supported counters for up to five dominant kernel names from a prior
+    timeline, using fresh workload outputs per kernel. Optionally request
+    occupancy/stall sections; return per-capture evidence and partial failures
+    separately from benchmark timings.
+    """
     directory = Path(directory)
     if not kernels:
         return unavailable("A timeline with dominant kernel signatures is required", "missing_timeline")

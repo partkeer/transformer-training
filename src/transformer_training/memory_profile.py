@@ -11,17 +11,30 @@ from .measurements import unavailable
 
 
 def storage_record(tensor):
+    """Return a tensor storage's device, address, and byte size, allowing views and
+    aliases to be counted as one allocation.
+    """
     storage = tensor.untyped_storage()
     return (str(tensor.device), storage.data_ptr(), storage.nbytes())
 
 
 def unique_storage_bytes(tensors):
+    """Sum bytes across distinct tensor storages, ignoring None entries and counting
+    shared storage only once.
+    """
     return sum(key[2] for key in {storage_record(t) for t in tensors if t is not None})
 
 
 def static_memory(model, optimizer):
+    """Return separate live-storage totals for parameters, gradients, and materialised
+    optimiser state. Deduplicate aliases within each category and distinguish
+    optimiser state held on other devices.
+    """
     params = list(model.parameters())
     def tensors(value):
+        """Yield tensors recursively from nested dictionaries, tuples, and lists in
+        optimiser state, ignoring nontensor metadata.
+        """
         if isinstance(value, torch.Tensor):
             yield value
         elif isinstance(value, dict):
@@ -42,31 +55,49 @@ def static_memory(model, optimizer):
 class _Saved:
     def __init__(self, tensor, tracker):
         # The packed value owns storage, not the original grad_fn (which can create a cycle).
+        """Retain a detached tensor for autograd's saved-tensor hook and register its
+        storage, avoiding ownership of the original grad_fn.
+        """
         self.tensor, self.tracker = tensor.detach(), tracker
         self.key = storage_record(tensor)
         tracker.add(self.key)
 
     def __del__(self):
+        """Release this packed tensor's storage reference count when autograd no longer
+        owns it, allowing lifetimes to end without backward as well.
+        """
         self.tracker.remove(self.key)
 
 
 class SavedActivations:
     """Count storage once while autograd owns packed tensors; no extra tensor references."""
     def __init__(self, model):
+        """Record parameter storage identities to exclude from activation totals and
+        initialise reference counts, event history, and peak observations.
+        """
         self.parameters = {storage_record(p) for p in model.parameters()}
         self.live, self.events, self.peak, self.peak_storages = {}, [], 0, []
 
     def add(self, key):
+        """Increment ownership of a saved storage key and record the live nonparameter
+        storage total without double-counting aliases.
+        """
         self.live[key] = self.live.get(key, 0) + 1
         self._record("save", key)
 
     def remove(self, key):
+        """Release one ownership of a storage key, remove it after the final reference,
+        and record the resulting live total.
+        """
         self.live[key] -= 1
         if not self.live[key]:
             del self.live[key]
         self._record("release", key)
 
     def _record(self, action, key):
+        """Append a timestamped save/release event and update the maximum simultaneous
+        nonparameter storage and its identities.
+        """
         keys = [k for k in self.live if k not in self.parameters]
         size = sum(k[2] for k in keys)
         if size > self.peak:
@@ -75,14 +106,23 @@ class SavedActivations:
                             "saved_nonparameter_bytes": size})
 
     def __enter__(self):
+        """Install autograd hooks that wrap saved tensors in tracked detached owners
+        and return this tracker for context-managed reporting.
+        """
         self.hooks = torch.autograd.graph.saved_tensors_hooks(lambda t: _Saved(t, self), lambda obj: obj.tensor)
         self.hooks.__enter__()
         return self
 
     def __exit__(self, *args):
+        """Remove saved-tensor hooks on context exit, forwarding exception information
+        and the underlying context manager's result.
+        """
         return self.hooks.__exit__(*args)
 
     def report(self):
+        """Return the peak and event history for saved nonparameter storage. This can
+        include inputs and is separate from total tensor or CUDA allocator memory.
+        """
         return {"peak_saved_nonparameter_storage_bytes": self.peak,
                 "storages_at_saved_peak": self.peak_storages, "events": self.events,
                 "scope": "saved-for-backward storage excluding parameters; may include inputs; separate from allocator peak"}
@@ -91,12 +131,19 @@ class SavedActivations:
 class MemoryAdapter:
     """Contain private APIs required by PyTorch 2.14; never silently invent attribution."""
     def __init__(self, device):
+        """Resolve the requested torch device, making an unindexed CUDA device
+        explicit, and initialise allocation-history recording as disabled.
+        """
         self.device = torch.device(device)
         if self.device.type == "cuda" and self.device.index is None:
             self.device = torch.device("cuda", torch.cuda.current_device())
         self.history = False
 
     def start(self):
+        """Enable bounded CUDA allocator history and capture its initial snapshot.
+        Return availability metadata, explicitly reporting unsupported CPU execution
+        or private-API failures.
+        """
         if self.device.type != "cuda":
             return unavailable("CUDA allocation history is unavailable on CPU")
         try:
@@ -108,6 +155,11 @@ class MemoryAdapter:
             return unavailable(str(error))
 
     def finish(self, profiler, directory):
+        """Export allocator and profiler memory artifacts into the directory and return
+        available peak/category evidence. Disable active allocation-history
+        recording and report missing attribution explicitly rather than estimating
+        it.
+        """
         directory = Path(directory)
         result = {}
         if self.history:
@@ -169,7 +221,12 @@ class MemoryAdapter:
 
 
 def replay_allocator_peak(initial, final, device_index):
-    """Reconstruct simultaneous active allocations, retaining pending frees until completion."""
+    """Return simultaneous peak active bytes and allocations for one CUDA device.
+
+    Replay final allocation events from the initial snapshot, retaining pending
+    frees until completion. Preserve stack evidence and preexisting allocations;
+    bounded or evicted history can make the reconstruction incomplete.
+    """
     live = {}
     for segment in initial.get("segments", []):
         if segment["device"] != device_index:

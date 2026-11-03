@@ -15,6 +15,9 @@ from transformer_training.data import (
 
 
 def fixture_tokenizer():
+    """Return a deterministic local word-level tokenizer with a small vocabulary and
+    EOS, avoiding downloads in data-pipeline tests.
+    """
     tokenizer = Tokenizer(models.WordLevel(
         {"<unk>": 0, "<|endoftext|>": 1,
          **{letter: i + 2 for i, letter in enumerate("abcdefghij")}},
@@ -24,6 +27,9 @@ def fixture_tokenizer():
 
 
 def fixture_splits():
+    """Return separate in-memory train/validation stories with long, short, and blank
+    entries for testing windowing and filtering.
+    """
     return DatasetDict({
         "train": Dataset.from_dict({"text": ["a b c d e", "f", "", "  "]}),
         "validation": Dataset.from_dict({"text": ["g h", "i j"]}),
@@ -33,6 +39,10 @@ def fixture_splits():
 class NextTokenTests(unittest.TestCase):
     def test_windows_cover_every_pair_without_crossing_stories(self):
         # Includes an exact multiple, a short tail, a one-token story and blanks.
+        """Check that long windows, exact boundaries, short tails, and single-token
+        stories retain every next-token pair once, while blank stories produce no
+        windows.
+        """
         texts = ["a b c d", "e f g h i", "j", "", "  "]
         tokenizer = fixture_tokenizer()
         result = tokenise_stories({"text": texts}, list(range(5)),
@@ -48,6 +58,10 @@ class NextTokenTests(unittest.TestCase):
         self.assertNotIn(4, result["source_row"])
 
     def test_padding_eos_loss_and_gradient(self):
+        """Check already-shifted labels and tensor dtypes, and verify genuine EOS
+        contributes to loss while padded targets contribute neither loss nor
+        gradient.
+        """
         batch = NextTokenCollator(4, 1)([
             {"tokens": [2, 3, 4, 5, 1]}, {"tokens": [6, 1]}])
         self.assertEqual(batch["input_ids"].tolist(), [[2, 3, 4, 5], [6, 1, 1, 1]])
@@ -67,6 +81,9 @@ class NextTokenTests(unittest.TestCase):
         self.assertEqual(logits.grad[~valid].abs().sum().item(), 0)
 
     def test_sequence_length_one(self):
+        """Verify the smallest supported context retains adjacent token pairs and the
+        final EOS target.
+        """
         result = tokenise_stories({"text": ["a b"]}, [0],
                                   tokenizer=fixture_tokenizer(), sequence_length=1, eos_id=1)
         self.assertEqual(result["tokens"], [[2, 3], [3, 1]])
@@ -74,10 +91,16 @@ class NextTokenTests(unittest.TestCase):
 
 class LoaderTests(unittest.TestCase):
     def make(self, **options):
+        """Build fixture loaders with two-token windows and three-example batches,
+        forwarding optional settings for individual tests.
+        """
         return create_dataloaders(fixture_splits(), fixture_tokenizer(),
                                   sequence_length=2, batch_size=3, **options)
 
     def test_splits_shapes_validation_order_and_partial_batches(self):
+        """Verify split sizes, CPU tensor shapes, stable validation order, and
+        retention of a one-example final training batch.
+        """
         loaders = self.make()
         self.assertEqual(len(loaders.train.dataset), 4)
         self.assertEqual(len(loaders.validation.dataset), 2)
@@ -90,6 +113,9 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(first[0]["input_ids"].device.type, "cpu")
 
     def test_shuffling_is_reproducible_across_epochs_and_independent_of_global_rng(self):
+        """Compare equally seeded loaders across epochs after unrelated global RNG use,
+        and verify a requested seed reaches the loader's dedicated generator.
+        """
         a, b = self.make(seed=7), self.make(seed=7)
         for _ in range(2):
             torch.rand(100)  # This must not affect either loader's dedicated RNG.
@@ -100,6 +126,9 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(self.make(seed=8).train.generator.initial_seed(), 8)
 
     def test_sample_provenance_and_tokenizer_settings(self):
+        """Check sampled source-row provenance and verify loader preparation disables
+        padding/truncation on a copy while preserving the caller's tokenizer.
+        """
         tokenizer = fixture_tokenizer()
         tokenizer.enable_truncation(max_length=1)
         tokenizer.enable_padding(length=20, pad_id=1)
@@ -115,12 +144,18 @@ class LoaderTests(unittest.TestCase):
         self.assertIsNotNone(tokenizer.truncation)  # Original instance is unchanged.
 
     def test_worker_process_matches_single_process(self):
+        """Compare all batch tensors from single-process and two-worker loading for
+        identical fixture inputs.
+        """
         single, multi = self.make(), self.make(num_workers=2)
         for a, b in zip(single.train, multi.train):
             for key in a:
                 torch.testing.assert_close(a[key], b[key])
 
     def test_errors_for_empty_invalid_and_missing_data(self):
+        """Verify clear errors for unusable stories, non-string text, missing
+        splits/columns, and invalid loader settings.
+        """
         empty = fixture_splits()
         empty["train"] = Dataset.from_dict({"text": ["", "  "]})
         with self.assertRaisesRegex(ValueError, "no usable stories"):
@@ -141,7 +176,13 @@ class LoaderTests(unittest.TestCase):
                 create_dataloaders(fixture_splits(), fixture_tokenizer(), **options)
 
     def test_cached_revision_must_match_recorded_revision(self):
+        """Check that matching cached commit paths pass and mismatched or unverifiable
+        cache paths fail before preprocessing.
+        """
         def cached(revision):
+            """Return minimal split metadata whose Arrow path appears under the
+            requested revision, without reading a dataset cache.
+            """
             return SimpleNamespace(cache_files=[
                 {"filename": f"cache/default/0.0.0/{revision}/stories.arrow"}])
 

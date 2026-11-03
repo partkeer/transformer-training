@@ -6,6 +6,10 @@ import sys
 
 
 def quality_worker(request):
+    """Train or resume one variant to its budget, evaluate latest.pt on full validation
+    with FP32 eager reference attention, and write quality.json with loss, work
+    counters, validation identity, and checkpoint checksum.
+    """
     from .cli import main as train
     from .checkpoint import atomic_json
     from .implementations import file_sha256

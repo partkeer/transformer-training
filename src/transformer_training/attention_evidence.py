@@ -11,6 +11,11 @@ from .measurements import digest
 
 
 def capture_attention(model, batches, *, device, precision, environment, backward=True):
+    """Profile representative batch shapes outside measured timing to identify
+    attention operators, optionally including backward but no optimiser step. Return
+    evidence tied to settings and environment, reject contradictory forced-backend
+    observations, and restore original gradients, RNG, and model mode.
+    """
     if model.implementation.attention == "reference":
         return {"status": "reference", "observed": ["explicit"], "scope": "training forward/backward" if backward else "evaluation forward"}
     rng = capture_rng()

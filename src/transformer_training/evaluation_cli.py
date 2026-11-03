@@ -8,6 +8,10 @@ from .implementations import add_implementation_arguments
 
 
 def build_parser():
+    """Return a checkpoint-evaluation parser with execution overrides, validation
+    selection, and generation controls. Keep generation seed independent of the
+    saved validation selection seed.
+    """
     parser = argparse.ArgumentParser(
         description="Evaluate a trained TinyStories checkpoint and generate story samples.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -37,6 +41,10 @@ def build_parser():
 
 
 def main(argv=None):
+    """Parse options, configure offline mode before data imports, and run checkpoint
+    evaluation. Print metrics and continuations without duplicating complete text,
+    returning zero on success or reporting a CLI error.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.offline:

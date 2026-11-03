@@ -15,16 +15,30 @@ MEASUREMENT_VERSION = 1
 
 
 def unavailable(reason, status="unavailable"):
+    """Return a structured missing-measurement value with a reason and status, keeping
+    unavailable data distinct from a measured zero.
+    """
     return {"status": status, "value": None, "reason": reason}
 
 
 def digest(value):
+    """Return a SHA-256 digest of JSON-serialisable data using sorted object keys so
+    dictionary insertion order does not change its identity.
+    """
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def source_identity():
+    """Return the Git revision, dirty flag, and hash of tracked and nonignored
+    untracked file contents, including deletion markers. Return an unavailable
+    record if Git or filesystem reads fail.
+    """
     root = Path(__file__).resolve().parents[2]
     def git(*args):
+        """Run a bounded read-only Git command in the repository and return stripped
+        output, using a command-local ownership exception without changing global
+        Git configuration.
+        """
         return subprocess.check_output(
             ["git", "-c", f"safe.directory={root.as_posix()}", *args],
             cwd=root, text=True, stderr=subprocess.DEVNULL, timeout=10).strip()
@@ -60,9 +74,16 @@ class Invocation:
     numerical_failures: int = 0
 
     def __post_init__(self):
+        """Capture the invocation start time with the supplied clock so lifecycle
+        timing includes subsequent trainer construction.
+        """
         self.started = self.clock()
 
     def record(self, tokens, seconds, skipped):
+        """Account for one complete attempt's tokens and elapsed seconds,
+        distinguishing processed from successfully applied tokens. Exclude initial
+        warm-up attempts from measured totals even when those attempts are skipped.
+        """
         self.attempts += 1
         self.updates += int(not skipped)
         self.processed_tokens += tokens
@@ -75,6 +96,10 @@ class Invocation:
             self.measured_seconds += seconds
 
     def snapshot(self, *, elapsed=None, status="running"):
+        """Return versioned counters and throughput rates using supplied elapsed time
+        or the clock. Include skipped-attempt time in denominators and mark warmed
+        rates unavailable when there is no measured time.
+        """
         elapsed = self.clock() - self.started if elapsed is None else elapsed
         measured = self.measured_seconds
         return {
@@ -102,11 +127,18 @@ class Invocation:
 class Phases:
     """Optional host ranges and NVTX. Never synchronize within a phase."""
     def __init__(self, enabled=False, nvtx=False):
+        """Configure optional host/profiler ranges and NVTX annotations, starting with
+        empty cumulative host timings and instrumentation disabled by default.
+        """
         self.enabled, self.nvtx = enabled, nvtx
         self.host_seconds = {}
 
     @contextmanager
     def range(self, name):
+        """Yield a named training phase, optionally recording profiler/NVTX ranges and
+        cumulative host time. Always close ranges on exit and never synchronise the
+        device within a phase.
+        """
         if not self.enabled:
             yield
             return
@@ -126,11 +158,18 @@ class Phases:
 class DeviceMemorySampler:
     """One persistent nvidia-smi process, selected by CUDA UUID, sampled every 200 ms."""
     def __init__(self, gpu_uuid=None, interval_ms=200):
+        """Prepare sampling for one GPU UUID and interval without starting a process;
+        initialise an unavailable status when no CUDA UUID is supplied.
+        """
         self.uuid, self.interval_ms = gpu_uuid, interval_ms
         self.samples, self.process, self.thread = [], None, None
         self.status = unavailable("CUDA UUID unavailable; device-wide sampling was not started")
 
     def start(self):
+        """Start a persistent nvidia-smi reader thread for this GPU and return the
+        sampler. Record an unavailable status when no UUID or executable is
+        available.
+        """
         if not self.uuid:
             return self
         try:
@@ -147,6 +186,9 @@ class DeviceMemorySampler:
         return self
 
     def _read(self):
+        """Read nvidia-smi CSV rows in the background, retaining timestamped byte
+        counts only for the selected GPU and skipping malformed samples.
+        """
         for line in self.process.stdout:
             try:
                 gpu, mib = next(csv.reader([line]))
@@ -157,6 +199,10 @@ class DeviceMemorySampler:
                 continue
 
     def stop(self):
+        """Terminate sampling, join the reader, and return samples plus their maximum
+        or an unavailable reason. The maximum is sampled device-wide usage,
+        including other processes, rather than an exact allocator peak.
+        """
         if self.process is not None:
             if self.process.poll() is None:
                 self.process.terminate()

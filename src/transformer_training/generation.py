@@ -14,6 +14,10 @@ DEFAULT_PROMPTS = (
 
 
 def validate_generation_options(*, max_new_tokens, temperature, top_k, seed):
+    """Reject invalid token limits, nonfinite or negative temperature, negative top-k,
+    and seeds outside [0, 2**63). Temperature zero and top-k zero remain valid
+    greedy and full-vocabulary options.
+    """
     if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
         raise ValueError("max_new_tokens must be a positive integer")
     if not math.isfinite(temperature) or temperature < 0:
@@ -25,7 +29,11 @@ def validate_generation_options(*, max_new_tokens, temperature, top_k, seed):
 
 
 def encode_prompt(tokenizer, prompt, context_length):
-    """Never truncate the prompt or add EOS to an unfinished story opening."""
+    """Return prompt token IDs without adding EOS or truncating the opening.
+
+    Reject blank prompts, tokenizers with padding/truncation enabled, and inputs
+    that leave no context space for at least one generated token.
+    """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Prompts must be nonblank strings")
     if tokenizer.padding is not None or tokenizer.truncation is not None:

@@ -14,6 +14,9 @@ from transformer_training.model import DecoderOnlyTransformer
 
 class ModelTests(unittest.TestCase):
     def setUp(self):
+        """Save the thread setting and create a seeded, dropout-free small decoder on
+        one CPU thread for stable numerical comparisons.
+        """
         self.old_threads = torch.get_num_threads()
         torch.set_num_threads(1)
         torch.manual_seed(7)
@@ -22,9 +25,15 @@ class ModelTests(unittest.TestCase):
         self.model = DecoderOnlyTransformer(self.config)
 
     def tearDown(self):
+        """Restore the PyTorch thread count so model tests do not alter later tests'
+        execution settings.
+        """
         torch.set_num_threads(self.old_threads)
 
     def test_shapes_tying_parameter_count_and_serialisation(self):
+        """Check logits across supported shapes, tied embeddings, serialisable
+        settings, default parameter count, and initial bias/LayerNorm values.
+        """
         self.assertEqual(self.model(torch.tensor([[2, 3, 4]])).shape, (1, 3, 12))
         self.assertEqual(self.model(torch.tensor([[2]])).shape, (1, 1, 12))
         self.assertEqual(self.model(torch.ones(2, 5, dtype=torch.long)).shape, (2, 5, 12))
@@ -45,6 +54,9 @@ class ModelTests(unittest.TestCase):
                 self.assertTrue((module.bias == 0).all())
 
     def test_causality_and_padding_isolation(self):
+        """Verify future-token and padding changes cannot affect valid earlier logits,
+        and padded execution agrees with the corresponding short prefix.
+        """
         self.model.eval()
         a = torch.tensor([[2, 3, 4, 5, 6]])
         b = torch.tensor([[2, 3, 9, 10, 11]])
@@ -56,6 +68,9 @@ class ModelTests(unittest.TestCase):
         torch.testing.assert_close(padded[:, :2], self.model(b[:, :2]), atol=1e-7, rtol=1e-6)
 
     def test_loss_alignment_and_gradients(self):
+        """Compare summed loss with a manual already-aligned objective, checking
+        ignored-target gradients and finite gradient flow through the decoder.
+        """
         ids = torch.tensor([[2, 3, 4, 1, 1], [5, 1, 1, 1, 1]])
         labels = torch.tensor([[3, 4, 1, -100, -100], [1, -100, -100, -100, -100]])
         logits = self.model(ids, labels != -100)
@@ -74,6 +89,10 @@ class ModelTests(unittest.TestCase):
         self.assertGreater(self.model.blocks[0].attention.qkv.weight.grad.abs().sum(), 0)
 
     def test_default_architecture_forward_backward_and_masking(self):
+        """Exercise the full default architecture on short synthetic inputs, checking
+        logits, tied weights, causality, padding isolation, and finite backward
+        gradients.
+        """
         model = DecoderOnlyTransformer(ModelConfig())
         self.assertIs(model.token_embedding.weight, model.lm_head.weight)
         ids = torch.tensor([[2, 3, 4, 5], [6, 7, 1, 1]])
@@ -100,6 +119,9 @@ class ModelTests(unittest.TestCase):
         self.assertGreater(model.blocks[0].attention.qkv.weight.grad.abs().sum(), 0)
 
     def test_invalid_configurations_and_inputs(self):
+        """Check invalid dimensions/dropout, input ranks/dtypes/lengths, and malformed
+        padding prefixes fail explicitly.
+        """
         for options in ({"heads": 3}, {"layers": 0}, {"dropout": 1},
                         {"dropout": float("nan")}, {"d_ff": -1}):
             with self.subTest(options=options), self.assertRaises(ValueError):

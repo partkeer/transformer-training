@@ -21,6 +21,9 @@ from .config import ImplementationConfig
 
 
 def percentile(values, fraction):
+    """Return a linearly interpolated quantile for a fraction in [0, 1], or None for no
+    observations. Sorting a copy preserves the supplied sample order.
+    """
     values = sorted(values)
     if not values:
         return None
@@ -31,6 +34,10 @@ def percentile(values, fraction):
 
 
 def distribution(values):
+    """Return count, central tendency, range, quantiles, and sample standard deviation.
+    Empty samples produce None statistics; standard deviation needs at least two
+    observations.
+    """
     return {"count": len(values), "median": statistics.median(values) if values else None,
             "mean": statistics.mean(values) if values else None,
             "sample_stddev": statistics.stdev(values) if len(values) > 1 else None,
@@ -40,6 +47,10 @@ def distribution(values):
 
 
 def comparison_identity(trainer, mode):
+    """Return workload, initial state, checkpoint, implementation, data, and
+    environment fields needed to compare trials, excluding logging and quality-
+    observation controls.
+    """
     config = asdict(trainer.config)
     for key in ("log_every", "eval_every", "checkpoint_every", "validation_loss_targets",
                 "timing_warmup_steps", "supervised_token_budget"):
@@ -53,6 +64,9 @@ def comparison_identity(trainer, mode):
 
 
 def field_differences(left, right, prefix=""):
+    """Recursively return dotted paths whose values differ between nested dictionaries,
+    treating nondictionary values as leaves and a missing key like None.
+    """
     if isinstance(left, dict) and isinstance(right, dict):
         return [path for key in sorted(left.keys() | right.keys())
                 for path in field_differences(left.get(key), right.get(key),
@@ -61,6 +75,11 @@ def field_differences(left, right, prefix=""):
 
 
 def compare_results(baseline, candidate, *, allowed_changes=()):
+    """Compare benchmark summaries when identities match apart from declared precision
+    or implementation changes. Return speed, memory, and latency changes when
+    eligible; otherwise report mismatched conditions, contaminated timing, or
+    missing backend evidence.
+    """
     left, right = baseline["comparison"], candidate["comparison"]
     differences = field_differences(left, right)
     allowed = {"training.precision", *["implementation." + key for key in asdict(ImplementationConfig())]}
@@ -90,7 +109,11 @@ def compare_results(baseline, candidate, *, allowed_changes=()):
 
 
 def run_trial(trainer, *, warmup=10, measured=50, mode="loader", backend="benchmark"):
-    """Mutates only this isolated trial's model; never saves training checkpoints."""
+    """Run bounded warm-up and measured attempts on an isolated trainer and return
+    trial evidence, writing diagnostic artifacts but no training checkpoints. Loader
+    mode advances through data; fixed mode reuses a batch group. Profiling and
+    intervals with compilation are ineligible for benchmark comparison.
+    """
     if warmup < 0 or measured < 1 or mode not in {"loader", "fixed"}:
         raise ValueError("Invalid trial workload")
     output, c, state = trainer.output_dir, trainer.config, trainer.state
@@ -112,6 +135,10 @@ def run_trial(trainer, *, warmup=10, measured=50, mode="loader", backend="benchm
     trace_path = output / "trace.json"
 
     def group():
+        """Return the next accumulation group or reuse fixed inputs, restoring pending
+        RNG after iterator creation. Reject insufficient data or schedule instead of
+        silently shortening the trial.
+        """
         nonlocal iterator, fixed
         if state["epoch"] >= c.epochs or state["updates"] >= trainer.total_updates:
             raise ValueError("Insufficient data/schedule remains for all warm-up and measured attempts")
@@ -130,6 +157,10 @@ def run_trial(trainer, *, warmup=10, measured=50, mode="loader", backend="benchm
         return batches
 
     def attempt():
+        """Execute and synchronise one shared optimiser attempt, update trial counters
+        and consumed cursor, and return loss/token statistics, elapsed time, and
+        compilation detection.
+        """
         nonlocal iterator
         trainer._sync()
         started = time.perf_counter()
@@ -264,6 +295,10 @@ def run_trial(trainer, *, warmup=10, measured=50, mode="loader", backend="benchm
 
 
 def aggregate_trials(trials):
+    """Combine nonempty unprofiled trials with identical comparison identities into
+    throughput, latency, and memory distributions. Preserve individual trials and
+    mark the aggregate ineligible if any constituent timing is ineligible.
+    """
     if not trials:
         raise ValueError("No trials to aggregate")
     if any(t["kind"] != "benchmark" for t in trials):
@@ -283,4 +318,7 @@ def aggregate_trials(trials):
 
 
 def compiler_after_measurement_available(trainer):
+    """Return whether compiler telemetry is readable for this trainer, a prerequisite
+    for trusting warmed timings when compilation is enabled.
+    """
     return compiler_snapshot(trainer.implementation.compile)["status"] == "available"

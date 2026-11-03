@@ -28,6 +28,9 @@ IGNORE_INDEX = -100
 
 
 def _resolve_revision(repo, revision, *, dataset=False):
+    """Return an immutable commit unchanged, or resolve a symbolic dataset/model
+    revision through the Hub so later loads record concrete source identity.
+    """
     if re.fullmatch(r"[0-9a-f]{40}", revision):
         return revision
     api = HfApi()
@@ -52,7 +55,13 @@ def _check_dataset_revision(splits, revision):
 
 def tokenise_stories(batch, indices, *, tokenizer, sequence_length, eos_id,
                      source_indices=None):
-    """A batched Arrow map: skip blank text, reject invalid schema, keep tails."""
+    """Return token windows and original source-row IDs for an Arrow map batch.
+
+    Tokenise each unchanged nonblank story independently, append genuine EOS,
+    and overlap windows by one token so every next-token pair appears once.
+    Keep short tails, skip blank strings, and reject non-string text; never join
+    stories or discard original row identity after filtering and sampling.
+    """
     texts, source_rows = [], []
     for position, (text, index) in enumerate(zip(batch["text"], indices)):
         if not isinstance(text, str):
@@ -84,6 +93,11 @@ class NextTokenCollator:
     pad_id: int
 
     def __call__(self, examples):
+        """Convert per-story windows into int64 inputs and already-shifted labels plus
+        a boolean padding mask, all [batch, sequence_length] on CPU. Ignore padding
+        labels with -100 while retaining genuine EOS targets; reject invalid window
+        lengths.
+        """
         shape = (len(examples), self.sequence_length)
         inputs = torch.full(shape, self.pad_id, dtype=torch.long)
         labels = torch.full(shape, IGNORE_INDEX, dtype=torch.long)
@@ -115,6 +129,9 @@ class TinyStoriesValidation:
 
 
 def _prepare_tokenizer(tokenizer):
+    """Clone a tokenizer, disable padding and truncation, and return the clone with its
+    required EOS ID without mutating the caller's tokenizer.
+    """
     eos_id = tokenizer.token_to_id("<|endoftext|>")
     if eos_id is None:
         raise ValueError("Tokenizer must define <|endoftext|> as EOS")
@@ -127,7 +144,10 @@ def _prepare_tokenizer(tokenizer):
 def _prepare_split(split, tokenizer, *, name, sequence_length, batch_size,
                    selection_seed, num_workers, pin_memory, max_stories,
                    original_rows):
-    """Shared selection/map arguments preserve existing Arrow fingerprints."""
+    """Select a seeded subset when requested, tokenise per-story windows through Arrow,
+    and return a CPU loader with provenance metadata. Keep partial batches, shuffle
+    training only, and reject a split with no usable windows.
+    """
     if "text" not in split.column_names:
         raise ValueError(f"{name} has no text column")
     eos_id = tokenizer.token_to_id("<|endoftext|>")
@@ -166,6 +186,10 @@ def _prepare_split(split, tokenizer, *, name, sequence_length, batch_size,
 
 
 def _exclude_audited_rows(batch, indices, *, excluded):
+    """Remove audited original row indices from an Arrow map batch and attach
+    _source_row to retained rows, preserving source identity through later sampling
+    and tokenisation.
+    """
     keep = [position for position, row in enumerate(indices) if row not in excluded]
     result = {name: [values[position] for position in keep]
               for name, values in batch.items()}

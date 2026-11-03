@@ -27,11 +27,17 @@ from transformer_training.training import (CHECKPOINT_VERSION, EpochSampler, Tra
 
 
 def synthetic_loaders(batch_size=2, vocab_size=12):
+    """Return deterministic CPU loaders and minimal provenance for nine unequal-length
+    token windows, retaining a partial final batch without corpus access.
+    """
     examples = [{"tokens": tokens} for tokens in
                 ([2, 3, 4, 1], [3, 1], [4, 5, 1], [6, 7, 8, 1], [8, 1],
                  [9, 10, 1], [2, 1], [3, 4, 1], [5, 6, 7, 1])]
     collator = NextTokenCollator(4, 1)
     def loader(seed):
+        """Build one fixture loader with a dedicated seeded generator and the shared
+        next-token collator, isolating iterator setup from global RNG state.
+        """
         return DataLoader(examples, batch_size=batch_size, collate_fn=collator,
                           generator=torch.Generator().manual_seed(seed))
     return TinyStoriesLoaders(loader(1), loader(2), {
@@ -43,6 +49,9 @@ def synthetic_loaders(batch_size=2, vocab_size=12):
 
 class TrainingTests(unittest.TestCase):
     def setUp(self):
+        """Save the thread count and define a small dropout-enabled CPU model and two-
+        epoch accumulation configuration for synthetic training checks.
+        """
         self.old_threads = torch.get_num_threads()
         torch.set_num_threads(1)
         self.model_config = ModelConfig(vocab_size=12, sequence_length=4, layers=2,
@@ -52,9 +61,13 @@ class TrainingTests(unittest.TestCase):
                                      log_every=2, timing_warmup_steps=1)
 
     def tearDown(self):
+        """Restore the original PyTorch thread count after each training test."""
         torch.set_num_threads(self.old_threads)
 
     def test_accumulation_matches_combined_batch_with_unequal_lengths(self):
+        """Compare token-weighted accumulated loss/gradients with concatenated batches,
+        including a partial final batch and incomplete accumulation group.
+        """
         model = DecoderOnlyTransformer(replace(self.model_config, dropout=0))
         other = DecoderOnlyTransformer(model.config)
         other.load_state_dict(model.state_dict())
@@ -74,6 +87,9 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(result["examples"], 5)
 
     def test_validation_weights_tokens_and_restores_mode(self):
+        """Compare validation with a combined valid-token objective and check model
+        mode is restored for successful and empty-loader evaluation.
+        """
         model = DecoderOnlyTransformer(self.model_config)
         model.train()
         loader = synthetic_loaders().validation
@@ -93,6 +109,9 @@ class TrainingTests(unittest.TestCase):
         self.assertTrue(model.training)
 
     def test_schedule_short_runs_and_weight_decay_groups(self):
+        """Check unique parameter grouping, matrix-only weight decay, short schedule
+        endpoints/state restoration, and rejection of invalid training settings.
+        """
         model = DecoderOnlyTransformer(self.model_config)
         optimizer = make_optimizer(model, self.config)
         ids = [id(p) for group in optimizer.param_groups for p in group["params"]]
@@ -117,6 +136,9 @@ class TrainingTests(unittest.TestCase):
                 TrainingConfig(**options)
 
     def test_device_precision_requests_fail_without_silent_fallback(self):
+        """Verify CPU mixed precision, unavailable CUDA, and unsupported native BF16
+        requests fail rather than selecting another execution mode.
+        """
         for precision in ("fp16", "bf16"):
             with self.assertRaisesRegex(ValueError, "CPU only with fp32"):
                 validate_device(replace(self.config, precision=precision))
@@ -130,6 +152,9 @@ class TrainingTests(unittest.TestCase):
                 validate_device(TrainingConfig(precision="bf16"))
 
     def test_sampler_and_prefetch_independent_consumed_cursor(self):
+        """Check seeded epoch permutations, exact cursor suffixes, epoch changes, and
+        rejection of an out-of-range cursor.
+        """
         order = list(EpochSampler(20, 42, 3))
         self.assertEqual(sorted(order), list(range(20)))
         self.assertEqual(list(EpochSampler(20, 42, 3, 7)), order[7:])
@@ -138,6 +163,10 @@ class TrainingTests(unittest.TestCase):
             EpochSampler(20, 42, 0, 21)
 
     def test_atomic_checkpoint_and_rng_round_trip(self):
+        """Verify checkpoint RNG restoration reproduces subsequent draws, and
+        interrupted atomic replacement preserves the previous checkpoint and removes
+        temporary files.
+        """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.pt"
             state = capture_rng()
@@ -154,6 +183,10 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(list(Path(directory).glob("*.tmp")), [])
 
     def test_resume_matches_uninterrupted_with_dropout_and_worker_prefetch(self):
+        """Compare uninterrupted and resumed synthetic training exactly within this
+        environment, including dropout, changed worker counts, optimiser state,
+        schedule, and consumed counters.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             root = Path(directory)
             for workers in (0, 2):
@@ -185,6 +218,9 @@ class TrainingTests(unittest.TestCase):
                     self.assertTrue(any(row["event"] == "resume" for row in metrics))
 
     def test_resume_at_epoch_boundary_and_step_cap(self):
+        """Check an epoch-boundary checkpoint resumes to the same model as
+        uninterrupted training under a successful-update cap.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             root = Path(directory)
             config = replace(self.config, max_steps=4)
@@ -203,6 +239,9 @@ class TrainingTests(unittest.TestCase):
                 torch.testing.assert_close(a, b, rtol=0, atol=0)
 
     def test_incompatible_resume_and_nonempty_run_directory(self):
+        """Verify fresh runs protect occupied outputs and resume rejects changed
+        training settings or dataset fingerprints.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             root = Path(directory) / "run"
             trainer = Trainer(self.model_config, self.config, synthetic_loaders(), root)
@@ -219,6 +258,9 @@ class TrainingTests(unittest.TestCase):
                 Trainer(self.model_config, self.config, data, root, resume=checkpoint)
 
     def test_dry_run_never_imports_dataset_or_creates_output(self):
+        """Run the CLI in a subprocess with forbidden GPU/optimiser hooks and verify
+        dry-run reports default model size without data imports or output creation.
+        """
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "not-created"
@@ -247,6 +289,9 @@ class TrainingTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
     def test_cli_legacy_architecture_overrides_and_resume_dry_run(self):
+        """Check explicit legacy dimensions and inherited checkpoint architecture in
+        dry-run, and reject incompatible model overrides before data loading.
+        """
         from transformer_training.cli import main
 
         legacy = ModelConfig(layers=8, d_model=384, heads=6, d_ff=1536)
@@ -276,9 +321,15 @@ class TrainingTests(unittest.TestCase):
                     data.assert_not_called()
 
     def test_cli_resume_inherits_configuration_and_data_options(self):
+        """Check resume inherits saved revisions, sample limit, and model settings
+        while accepting the explicit operational logging override.
+        """
         from transformer_training.cli import main
 
         def data():
+            """Return synthetic loaders with fixed revision and selection metadata for
+            checking CLI resume inheritance without Hub access.
+            """
             loaders = synthetic_loaders()
             loaders.metadata.update(revision="dataset-sha", tokenizer_revision="tokenizer-sha",
                                     max_stories=9)
@@ -301,6 +352,9 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(load_checkpoint(output / "latest.pt")["training_config"]["log_every"], 1)
 
     def test_cli_rejects_abbreviations_before_loading_checkpoint_or_data(self):
+        """Verify abbreviated flags fail argument parsing before either checkpoint or
+        dataset reads.
+        """
         from transformer_training.cli import main
 
         for option in (["--batch-s", "3"], ["--learning-r=0.01"]):
@@ -314,6 +368,9 @@ class TrainingTests(unittest.TestCase):
                 data.assert_not_called()
 
     def test_cli_rejects_invalid_output_before_data_preparation(self):
+        """Check occupied directories, file destinations, and file-valued parents fail
+        before loading data and preserve existing contents.
+        """
         from transformer_training.cli import main
 
         with tempfile.TemporaryDirectory() as directory:
@@ -334,6 +391,9 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(existing.read_text(encoding="utf-8"), "Preserve this file")
 
     def test_cli_rejects_incompatible_resume_before_data_preparation(self):
+        """Verify model/training/data conflicts and unsupported checkpoint versions
+        fail before dataset preparation.
+        """
         from transformer_training.cli import main
 
         payload = {"version": CHECKPOINT_VERSION, "model_config": asdict(self.model_config),
@@ -361,6 +421,9 @@ class TrainingTests(unittest.TestCase):
                     data.assert_not_called()
 
     def test_gradient_clipping_matches_reference(self):
+        """Compare the custom clipping path's norm and gradient values with PyTorch's
+        reference on finite gradients.
+        """
         actual = torch.nn.Parameter(torch.ones(2))
         reference = torch.nn.Parameter(torch.ones(2))
         actual.grad = torch.tensor([3.0, 4.0])
@@ -372,6 +435,10 @@ class TrainingTests(unittest.TestCase):
 
     def test_fp16_norm_overflow_aborts_before_optimizer_and_counters(self):
         # Use a real CPU GradScaler to cover the FP16 update policy without CUDA.
+        """Use a CPU GradScaler to create finite gradient elements whose norm
+        overflows, checking the optimiser and consumed/update counters remain
+        untouched.
+        """
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             trainer = Trainer(self.model_config, self.config, synthetic_loaders(),
                               Path(directory) / "run")
@@ -381,6 +448,10 @@ class TrainingTests(unittest.TestCase):
             before = parameter.detach().clone()
 
             def extreme_gradients(model, batches, **kwargs):
+                """Backpropagate a scaled finite but very large gradient to force norm-
+                reduction overflow, returning minimal attempt statistics for the
+                failure test.
+                """
                 trainer.scaler.scale(parameter.sum() * 1e20).backward()
                 return {"loss_sum": 1.0, "supervised_tokens": 1, "slots": 1, "examples": 1}
 
@@ -399,6 +470,9 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(trainer.scheduler.completed_updates, 0)
 
     def test_amp_nonfinite_gradients_still_skip_and_recover(self):
+        """Use a CPU GradScaler to verify NaN/Inf gradients remain available for AMP
+        detection, skip parameter updates, and permit a later finite update.
+        """
         for value in (float("inf"), float("nan")):
             with self.subTest(value=value):
                 parameter = torch.nn.Parameter(torch.tensor([1.0]))
@@ -425,6 +499,9 @@ class TrainingTests(unittest.TestCase):
                 self.assertLess(parameter.item(), 1.0)
 
     def test_nonfinite_loss_stops_before_update_and_validation_restores_mode(self):
+        """Check NaN model outputs abort training before gradients form and restore the
+        original model mode when validation fails.
+        """
         model = DecoderOnlyTransformer(self.model_config)
         with torch.no_grad():
             model.lm_head.weight.fill_(float("nan"))
@@ -438,29 +515,54 @@ class TrainingTests(unittest.TestCase):
 
     def test_skipped_update_consumes_data_without_advancing_schedule(self):
         # Simulate the scaler contract on CPU; this is not a claim of CUDA AMP validation.
+        """Simulate one AMP skip on CPU and verify data consumption advances while
+        successful-update and schedule counters advance only on the later applied
+        update.
+        """
         class SkipFirstScaler:
             def __init__(self):
+                """Initialise a fake scaler that reports one scale decrease before
+                allowing subsequent updates.
+                """
                 self.scale_value, self.calls = 2.0, 0
 
             def scale(self, loss):
+                """Return the loss unchanged so the fake scaler exercises skip
+                bookkeeping without numerical scaling.
+                """
                 return loss
 
             def unscale_(self, optimizer):
+                """Leave gradients unchanged because this fake scaler never scaled
+                them; retain the interface used by the shared optimiser path.
+                """
                 pass
 
             def get_scale(self):
+                """Return the fake scale used to detect whether the most recent
+                optimiser attempt was skipped.
+                """
                 return self.scale_value
 
             def step(self, optimizer):
+                """Suppress the first optimiser step and execute later ones to simulate
+                AMP overflow recovery on CPU.
+                """
                 if self.calls:
                     optimizer.step()
 
             def update(self):
+                """Lower the fake scale after the first attempt and count calls so only
+                that attempt is classified as skipped.
+                """
                 if self.calls == 0:
                     self.scale_value /= 2
                 self.calls += 1
 
             def state_dict(self):
+                """Return fake scaler counters in checkpoint-compatible form for the
+                synthetic interruption test.
+                """
                 return {"scale": self.scale_value, "calls": self.calls}
 
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
@@ -478,6 +580,10 @@ class TrainingTests(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable; GPU checks not performed")
 class CudaTests(unittest.TestCase):
     def test_supported_precision_forward_backward(self):
+        """When CUDA is available, check finite accumulated gradients, clipping, and
+        optimiser execution for FP32, FP16, and natively supported BF16 on synthetic
+        batches.
+        """
         model_config = ModelConfig(vocab_size=12, sequence_length=4, layers=1,
                                    d_model=12, heads=3, d_ff=24, dropout=0)
         precisions = ["fp32", "fp16"]

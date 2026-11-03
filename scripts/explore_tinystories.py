@@ -29,6 +29,9 @@ WORD = re.compile(r"[A-Za-z]+(?:['\u2019][A-Za-z]+)*")
 
 
 def describe(values):
+    """Return percentiles, mean, and population standard deviation for a nonempty
+    sequence of counts; return None when there are no observations.
+    """
     if not values:
         return None
     return dict(zip(
@@ -38,7 +41,11 @@ def describe(values):
 
 
 def analyse(rows):
-    """Word counts are regex words, never subword/model token counts."""
+    """Summarise raw story rows without changing their text. Return statistics, exact-
+    text hash counts, character lengths, and regex word lengths; count missing,
+    invalid, and blank entries separately. Words here are regex matches, not model
+    tokens.
+    """
     characters, lengths = [], []
     words, fingerprints = Counter(), Counter()
     missing = non_string = empty = 0
@@ -76,6 +83,9 @@ def analyse(rows):
 
 
 def write_report(result, output):
+    """Write report.md in the existing output directory from sampled split statistics,
+    including examples, exact-text overlap, and limits on interpreting word counts.
+    """
     lines = ["# TinyStories exploratory analysis", "",
              f"Dataset: [{DATASET}](https://huggingface.co/datasets/{DATASET}).",
              f"Revision: `{result['revision']}`. Seed: {result['seed']}.", "",
@@ -133,6 +143,10 @@ def write_report(result, output):
 
 
 def main():
+    """Load the requested TinyStories revision, sample reproducible rows independently
+    from each split, and save JSON statistics, length-distribution plots, and a
+    Markdown report. A sample size of zero analyses every row.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample-size", type=int, default=10_000,
                         help="Rows per split; 0 analyses every row (more time/memory).")

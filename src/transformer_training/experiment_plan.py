@@ -15,16 +15,25 @@ EXPERIMENT_FIELDS = {"training.precision", *["implementation." + key
 
 
 def _keys(value, allowed, name):
+    """Require a dictionary containing only allowed keys, raising a named validation
+    error for unknown fields or a nonobject value.
+    """
     if not isinstance(value, dict) or value.keys() - allowed:
         raise ValueError(f"Invalid {name} keys: expected an object with {sorted(allowed)}")
 
 
 def _positive(value, name, minimum=1):
+    """Require an integer at least the minimum, rejecting booleans and other numeric
+    types so plan counts remain unambiguous.
+    """
     if type(value) is not int or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
 def _unique_object(pairs):
+    """Build a JSON object from key/value pairs while rejecting duplicate keys before a
+    parser could silently overwrite them.
+    """
     result = {}
     for key, value in pairs:
         if key in result:
@@ -34,10 +43,18 @@ def _unique_object(pairs):
 
 
 def load_plan(path):
+    """Read a UTF-8 JSON plan with duplicate-key detection and return its validated
+    fully resolved settings.
+    """
     return resolve_plan(json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=_unique_object))
 
 
 def resolve_plan(plan):
+    """Return a versioned plan with explicit model, training, data, benchmark, and
+    variant defaults without running workloads. Reject unsafe IDs, unpinned
+    revisions, invalid quality protocols, forward references, and undeclared
+    experimental changes.
+    """
     _keys(plan, {"version", "shared", "benchmark", "quality", "variants"}, "plan")
     if type(plan.get("version")) is not int or plan["version"] != 1:
         raise ValueError("Unsupported experiment plan version")
@@ -118,6 +135,10 @@ def resolve_plan(plan):
 
 
 def benchmark_request(plan, variant):
+    """Build a worker request for one resolved variant, combining shared model/data
+    settings with its training and implementation settings and the common benchmark
+    protocol.
+    """
     config = variant["training"]
     return {"model": plan["shared"]["model"], "training": config,
             "implementation": variant["implementation"], "checkpoint": None,

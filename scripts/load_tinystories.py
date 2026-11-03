@@ -11,6 +11,10 @@ os.environ.setdefault("HF_HOME", str(ROOT / ".cache" / "huggingface"))
 
 
 def main():
+    """Parse loader options, prepare both official splits, and inspect CPU batch shapes
+    and supervised-token counts. Write settings and observations to the requested
+    JSON report; --batches limits inspection, not preprocessing.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sequence-length", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=8)

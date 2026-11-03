@@ -16,7 +16,11 @@ from .training import CHECKPOINT_VERSION, environment, validate_device
 
 
 def loss_metrics(result):
-    """Extend the shared evaluator result with JSON-safe perplexity."""
+    """Return evaluator metrics plus perplexity computed as exp(mean token loss).
+
+    Reject nonfinite loss. If exponentiation overflows, use None and an explicit
+    overflow flag so the result remains valid JSON.
+    """
     if not math.isfinite(result["loss"]):
         raise FloatingPointError("Nonfinite validation loss")
     try:
@@ -28,7 +32,12 @@ def loss_metrics(result):
 
 
 def verify_validation_metadata(saved, actual, *, full_validation=False):
-    """Compare validation identity only; train preparation is unnecessary."""
+    """Reject changes in validation revisions, preprocessing, or saved selection.
+
+    Compare validation provenance only, without preparing training data. Explicit
+    full-validation evaluation may change the selection but must retain the
+    original split size and, when already full, its exact fingerprints.
+    """
     for key in ("dataset", "revision", "tokenizer", "tokenizer_revision",
                 "sequence_length", "vocab_size", "eos_id", "pad_id", "ignore_index"):
         if saved[key] != actual[key]:
@@ -48,6 +57,10 @@ def verify_validation_metadata(saved, actual, *, full_validation=False):
 
 
 def _samples_text(samples, *, include_complete_text=True):
+    """Format prompts, continuations, seeds, and stop reasons for display or a text
+    artifact. Optionally include complete decoded text; return an explicit skipped
+    message when there are no samples.
+    """
     if not samples:
         return "Generation skipped.\n"
     return "\n\n".join(

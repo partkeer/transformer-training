@@ -15,6 +15,10 @@ from .implementations import add_implementation_arguments, resolve_implementatio
 
 
 def build_parser():
+    """Return a training parser derived from model/training defaults, with
+    implementation, data, resume, and dry-run controls. Disable abbreviations and
+    obtain vocabulary size from the tokenizer during real training.
+    """
     parser = argparse.ArgumentParser(
         description="Train a small TinyStories decoder on one GPU.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -51,6 +55,11 @@ def build_parser():
 
 
 def main(argv=None):
+    """Resolve options, inherit compatible checkpoint settings, and run the shared
+    trainer, returning zero on success. Configure offline mode before data imports;
+    dry-run prints settings and CPU model size without data access, CUDA
+    initialisation, or output creation.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     explicit = set()

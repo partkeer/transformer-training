@@ -9,6 +9,9 @@ IGNORE_INDEX = -100
 
 
 def autocast_context(device, precision):
+    """Return a no-op context for FP32 or a device-specific autocast context for
+    BF16/FP16. The caller validates precision names and hardware support.
+    """
     if precision == "fp32":
         return nullcontext()
     dtype = torch.bfloat16 if precision == "bf16" else torch.float16
@@ -16,20 +19,28 @@ def autocast_context(device, precision):
 
 
 def move_batch(batch, device):
+    """Return a batch dictionary with tensors moved to the requested device, requesting
+    nonblocking copies so pinned CPU inputs can transfer asynchronously where
+    supported.
+    """
     return {key: tensor.to(device, non_blocking=True) for key, tensor in batch.items()}
 
 
 def next_token_loss(logits, labels):
-    """Sum already-aligned targets; never shift labels again."""
+    """Return summed cross-entropy over already-aligned next-token targets, ignoring
+    -100 padding. Never shift labels again; callers divide by the total supervised-
+    token count for their accumulation or evaluation scope.
+    """
     return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1),
                            ignore_index=IGNORE_INDEX, reduction="sum")
 
 
 @torch.no_grad()
 def evaluate(model, loader, *, device="cpu", precision="fp32", shape_examples=None):
-    """Divide summed token loss by all nonignored targets, including real EOS.
-
-    Averaging batch means would overweight short or heavily padded batches.
+    """Return mean next-token loss and supervised-token count over the loader,
+    including genuine EOS and excluding -100 padding. Sum losses before dividing to
+    avoid overweighting short batches, restore model mode even on failure, and
+    optionally retain a CPU batch for each observed shape.
     """
     was_training = model.training
     model.eval()

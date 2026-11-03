@@ -14,7 +14,12 @@ from .experiment_plan import benchmark_request, load_plan
 
 @contextmanager
 def suite_lock(output):
-    """An OS lock is released even after a killed process; no stale PID guessing."""
+    """Hold a nonblocking exclusive OS lock for one suite output directory.
+
+    Raise if another runner holds it, and release on context exit or process
+    termination so resume does not rely on guessing whether a saved PID is stale.
+    The output directory must already exist.
+    """
     with (output / ".suite.lock").open("a+b") as stream:
         stream.seek(0)
         if os.name == "nt":
@@ -44,6 +49,10 @@ def suite_lock(output):
 
 
 def artifact_manifest(directory, root):
+    """Return root-relative checksums for completed job files, excluding compiler
+    caches so resume verifies durable artifacts rather than transient generated
+    code.
+    """
     from .implementations import file_sha256
     return {path.relative_to(root).as_posix(): file_sha256(path)
             for path in sorted(directory.rglob("*")) if path.is_file()
@@ -51,6 +60,9 @@ def artifact_manifest(directory, root):
 
 
 def verify_manifest(manifest, output):
+    """Verify saved artifacts exist under the suite output with recorded checksums;
+    raise on missing or changed completed work before resuming.
+    """
     from .implementations import file_sha256
     for name, expected in manifest.items():
         path = output / name
@@ -59,6 +71,9 @@ def verify_manifest(manifest, output):
 
 
 def worker_environment(cache):
+    """Return a copy of the environment with worker-local Inductor/Triton caches,
+    remote compiler caches disabled, and graph-break/recompilation logging enabled.
+    """
     env = os.environ.copy()
     env.update(TORCHINDUCTOR_CACHE_DIR=str(cache / "inductor"), TRITON_CACHE_DIR=str(cache / "triton"),
         TORCHINDUCTOR_FX_GRAPH_REMOTE_CACHE="0", TORCHINDUCTOR_AUTOTUNE_REMOTE_CACHE="0",
@@ -68,12 +83,19 @@ def worker_environment(cache):
 
 
 def _launch_benchmark(request, destination, timeout):
+    """Run one isolated benchmark worker with the requested timeout and return its
+    trial.json path.
+    """
     from .diagnostics_cli import launch_worker
     launch_worker(request, destination, timeout=timeout)
     return destination / "trial.json"
 
 
 def _launch_quality(request, destination, timeout):
+    """Run an isolated quality worker in a new directory with a saved request, log, and
+    local compiler cache. Return quality.json on success or raise with exit code and
+    log tail.
+    """
     from .checkpoint import atomic_json
     from .subprocesses import run_bounded
     destination.mkdir(parents=True, exist_ok=False)
@@ -91,6 +113,10 @@ def _launch_quality(request, destination, timeout):
 
 
 def _compiler_seconds(trial):
+    """Sum reported compiler-event durations in seconds, returning zero when disabled
+    and None when durations are unavailable. Events can overlap, so this is not
+    exclusive wall time.
+    """
     compiler = trial["execution"]["compiler"]
     if compiler["status"] == "disabled":
         return 0.0
@@ -99,6 +125,10 @@ def _compiler_seconds(trial):
 
 
 def build_report(plan, state, output):
+    """Read completed artifacts to assemble per-variant benchmark, reference-
+    comparison, and paired-quality summaries. Retain incomplete or ineligible
+    statuses and return a report without launching work.
+    """
     from .diagnostics import aggregate_trials, compare_results, distribution
     from .experiment_report import paired_quality
 
@@ -167,6 +197,11 @@ def build_report(plan, state, output):
 
 
 def run_suite(plan, output, *, resume=False):
+    """Execute resolved variants sequentially, persist job state and reports, and
+    return the summary. Resume only with matching plan/source/environment identity
+    and verified artifacts; retry unfinished jobs in new attempt directories and
+    reuse available quality checkpoints.
+    """
     from .checkpoint import atomic_json
     from .implementations import file_sha256
     from .measurements import digest
@@ -255,6 +290,10 @@ def run_suite(plan, output, *, resume=False):
 
 
 def main(argv=None):
+    """Parse a plan, print resolved settings for dry-run or execute/resume the suite,
+    and return zero for completion or one for incomplete jobs. Report invalid
+    configuration as a CLI error.
+    """
     parser = argparse.ArgumentParser(description="Sequential transformer implementation comparisons", allow_abbrev=False)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path)

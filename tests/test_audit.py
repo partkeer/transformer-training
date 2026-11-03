@@ -13,6 +13,9 @@ from test_data import fixture_tokenizer
 
 
 def splits():
+    """Return in-memory splits containing exact overlap, within-split duplicates,
+    blanks, and whitespace differences to distinguish hashing from normalisation.
+    """
     return DatasetDict({
         "train": Dataset.from_dict({"text": ["a b", "c d", "a b", "e", "e", "", " g h "]}),
         "validation": Dataset.from_dict({"text": ["a b", "a b", "g h", " "]}),
@@ -21,6 +24,9 @@ def splits():
 
 class AuditTests(unittest.TestCase):
     def test_full_audit_counts_exactness_cache_and_source_ids(self):
+        """Verify full-split audit counts, cache reuse/invalidation, exact-only
+        exclusion, and original source-row identities after filtering and sampling.
+        """
         with tempfile.TemporaryDirectory() as directory:
             source = splits()
             result = audit_overlap(source, directory)
@@ -52,6 +58,9 @@ class AuditTests(unittest.TestCase):
             self.assertEqual(len(list(Path(directory).glob("*.json"))), 2)
 
     def test_default_retains_overlap_and_opt_in_fails_if_no_usable_train(self):
+        """Check default loaders retain overlap and explicit exclusion raises when
+        every training story is removed or blank.
+        """
         source = splits()
         unchanged = create_dataloaders(source, fixture_tokenizer(), sequence_length=3)
         self.assertNotIn("audit", unchanged.metadata)
@@ -64,6 +73,9 @@ class AuditTests(unittest.TestCase):
             create_dataloaders(source, fixture_tokenizer(), exclude_validation_overlap=True)
 
     def test_invalid_text_is_rejected_even_outside_sample(self):
+        """Verify full-split auditing rejects invalid validation text even when a later
+        sample could omit that row.
+        """
         source = splits()
         source["validation"] = Dataset.from_dict({"text": ["a b", None]})
         with self.assertRaisesRegex(ValueError, "string text"):

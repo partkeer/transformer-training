@@ -8,6 +8,10 @@ import subprocess
 class WindowsJob:
     """A private kill-on-close job; uses no taskkill or shell commands."""
     def __init__(self):
+        """Create a Windows job that kills its assigned process tree when closed.
+        Define required native structures locally and raise a Windows error if
+        creation or configuration fails.
+        """
         import ctypes
         from ctypes import wintypes
 
@@ -39,17 +43,28 @@ class WindowsJob:
             raise error
 
     def assign(self, process):
+        """Attach a subprocess to this job so closing it also cleans up descendant
+        workers; raise a Windows error if assignment fails.
+        """
         import ctypes
         if not self.kernel.AssignProcessToJobObject(self.handle, int(process._handle)):
             raise ctypes.WinError(ctypes.get_last_error())
 
     def close(self):
+        """Close the job handle once, triggering cleanup of assigned processes and
+        making subsequent close calls harmless.
+        """
         if self.handle:
             self.kernel.CloseHandle(self.handle)
             self.handle = None
 
 
 def run_bounded(arguments, *, timeout, stdout=None, stderr=None, capture_output=False, text=True, env=None):
+    """Run an argument-list command with a time limit and return a CompletedProcess
+    with optional captured output. Clean up descendant workers on completion,
+    timeout, or interruption using a Windows job or POSIX process group; never
+    invoke a shell.
+    """
     if capture_output:
         stdout, stderr = subprocess.PIPE, subprocess.PIPE
     job = WindowsJob() if os.name == "nt" else None
