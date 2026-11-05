@@ -98,9 +98,9 @@ carefully chosen custom GPU kernel.
 
 ## Communication
 
-- Always give clear but detailed answers unless the user explicitly requests
-  otherwise.
-- Include examples, edge cases, and practical implications where relevant.
+- Give brief, direct answers by default unless the user requests more detail.
+- Include examples, edge cases, and practical implications only when needed to
+  answer the question clearly or when requested.
 - After implementing new features, clearly but concisely explain how the user can run the feature.
 
 ## Git commit messages
