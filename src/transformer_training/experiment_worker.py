@@ -7,7 +7,7 @@ import sys
 
 def quality_worker(request):
     """Train or resume one variant to its budget, evaluate latest.pt on full validation
-    with FP32 eager reference attention, and write quality.json with loss, work
+    with FP32 eager reference attention and PyTorch loss, and write quality.json with loss, work
     counters, validation identity, and checkpoint checksum.
     """
     from .cli import main as train
@@ -41,7 +41,7 @@ def quality_worker(request):
     summary = json.loads((Path(training) / "summary.json").read_text())
     report = evaluate_checkpoint(Path(training) / "latest.pt", output_dir=Path(request["output"]) / "evaluation",
         device=request["training"]["device"], precision="fp32", full_validation=True, skip_generation=True,
-        implementation_overrides={"attention": "reference", "compile": False})
+        implementation_overrides={"attention": "reference", "compile": False, "loss_backend": "pytorch"})
     state = summary["state"]
     result = {**report["metrics"], "processed_tokens": state["supervised_tokens"],
         "applied_tokens": state["applied_supervised_tokens"], "skipped_updates": state["skipped_updates"],

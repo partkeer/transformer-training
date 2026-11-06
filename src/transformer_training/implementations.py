@@ -13,11 +13,13 @@ from .config import ImplementationConfig
 
 
 def add_implementation_arguments(parser, *, evaluation=False):
-    """Add attention, backend, and compilation options to a parser, plus
+    """Add attention, loss backend, and compilation options to a parser, plus
     optimiser/checkpointing switches for training. Leave defaults unset so omitted
     flags can inherit checkpoint settings.
     """
     parser.add_argument("--attention", choices=("reference", "sdpa"))
+    parser.add_argument("--loss-backend", choices=("pytorch", "triton"),
+                        help="Summed cross-entropy implementation; Triton is explicit and never falls back")
     parser.add_argument("--sdpa-backend", choices=("auto", "math", "flash", "efficient", "cudnn"))
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--compile-mode", choices=("default", "reduce-overhead", "max-autotune",
@@ -123,8 +125,16 @@ def compilation_changed(before, after):
 def execution_report(model):
     """Return requested execution settings, compile-wrapper time, compiler telemetry,
     and observed attention evidence; label uncaptured SDPA dispatch as unverified.
+    Loss metadata describes configured execution and deterministic launch settings,
+    not profiler-observed dispatch. Successful Triton calls cannot fall back.
     """
-    return {"requested": asdict(model.implementation),
+    from .loss import triton_launch_settings
+
+    loss = {"backend": model.implementation.loss_backend, "fallback": "explicit_pytorch_selection",
+            "evidence": "configuration; not a profiler observation"}
+    if model.implementation.loss_backend == "triton":
+        loss["launch"] = triton_launch_settings(model.config.vocab_size)
+    return {"requested": asdict(model.implementation), "loss": loss,
             "compile_wrapper_seconds": model.compile_wrapper_seconds,
             "compiler": compiler_snapshot(model.implementation.compile),
             "attention_evidence": getattr(model, "attention_evidence", {

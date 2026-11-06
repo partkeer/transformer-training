@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "shared": {"model": {}, "training": {}, "data": {}, "offline": false},
+  "benchmark": {"repeats": 5, "warmup": 10, "measured": 50, "input_mode": "fixed", "timeout_seconds": 1800},
+  "variants": [
+    {"id": "fp32-pytorch"},
+    {"id": "fp32-triton", "reference": "fp32-pytorch", "implementation": {"loss_backend": "triton"}, "changes": ["implementation.loss_backend"]},
+    {"id": "fp16-pytorch", "precision": "fp16"},
+    {"id": "fp16-triton", "precision": "fp16", "reference": "fp16-pytorch", "implementation": {"loss_backend": "triton"}, "changes": ["implementation.loss_backend"]},
+    {"id": "bf16-pytorch", "precision": "bf16"},
+    {"id": "bf16-triton", "precision": "bf16", "reference": "bf16-pytorch", "implementation": {"loss_backend": "triton"}, "changes": ["implementation.loss_backend"]}
+  ]
+}

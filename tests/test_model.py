@@ -70,6 +70,7 @@ class ModelTests(unittest.TestCase):
     def test_loss_alignment_and_gradients(self):
         """Compare summed loss with a manual already-aligned objective, checking
         ignored-target gradients and finite gradient flow through the decoder.
+        Select valid labels before adding the gather dimension for PyTorch 2.6.
         """
         ids = torch.tensor([[2, 3, 4, 1, 1], [5, 1, 1, 1, 1]])
         labels = torch.tensor([[3, 4, 1, -100, -100], [1, -100, -100, -100, -100]])
@@ -77,7 +78,7 @@ class ModelTests(unittest.TestCase):
         logits.retain_grad()
         loss = next_token_loss(logits, labels)
         expected = -logits.log_softmax(-1)[labels != -100].gather(
-            1, labels[labels != -100, None]).sum()
+            1, labels[labels != -100].unsqueeze(1)).sum()
         torch.testing.assert_close(loss, expected)
         loss.backward()
         self.assertTrue(torch.isfinite(loss))

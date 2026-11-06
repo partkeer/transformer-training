@@ -5,29 +5,31 @@ memory use, and validation quality across implementations.
 
 ## Setup
 
-Use **Python 3.14**. Run commands from the repository root in an activated
-environment. GPU commands require an NVIDIA GPU and CUDA-enabled **PyTorch 2.14.1**.
+Use **Python 3.12** (3.13 is also allowed) with **PyTorch 2.6.0**. Run commands
+from the repository root in an activated environment. GPU commands require an
+NVIDIA GPU and a CUDA-enabled PyTorch build. Triton requires **Linux or WSL2**.
 
 Create and activate the environment:
 
 ```bash
-# Linux
-python3.14 -m venv .venv
-source .venv/bin/activate
+# Linux / WSL2
+# Ubuntu prerequisite if ensurepip is missing: sudo apt install python3.12-venv
+python3.12 -m venv .venv-linux
+source .venv-linux/bin/activate
 ```
 
 ```powershell
 # Windows / PowerShell
-python -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-For GPU use, install PyTorch first. Replace the index URL using the
-[official installation guidance](https://pytorch.org/get-started/locally/)
-for your GPU and driver:
+For GPU use, install PyTorch first. This CUDA 12.4 build supports the RTX 2070;
+use a compatible NVIDIA driver. Other builds are listed in the
+[PyTorch 2.6 installation instructions](https://pytorch.org/get-started/previous-versions/#v260):
 
 ```bash
-python -m pip install torch==2.14.1 --index-url "<CUDA-wheel-index-URL>"
+python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 ```
 
 Install the project, then check GPU access if applicable:
@@ -39,6 +41,9 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 ```
 
 On rented machines, keep the project and `HF_HOME` cache on persistent storage.
+For Triton on Linux/WSL2 x86-64, install the pinned optional backend with
+`python -m pip install -e '.[triton]'` (Triton 3.2.0). Use a fresh environment
+when switching from the previous Python 3.14/PyTorch 2.14 setup.
 
 ## Train and resume
 
@@ -91,6 +96,7 @@ These switches work with training, benchmarking, and profiling:
 | Option | Values |
 |---|---|
 | `--precision` | `fp32`, `bf16`, `fp16` |
+| `--loss-backend` | `pytorch` (default), `triton` (Linux/WSL2 NVIDIA SM75+, explicit opt-in) |
 | `--attention` | `reference`, `sdpa` |
 | `--sdpa-backend` | `auto`, `math`, `flash`, `efficient`, `cudnn` |
 | `--compile` | Enable compilation; undo with `--no-compile` |
@@ -103,6 +109,29 @@ For example, benchmark BF16 with SDPA:
 ```bash
 python scripts/benchmark_training.py --precision bf16 --attention sdpa --output-dir runs/bf16-sdpa
 ```
+
+For fused cross-entropy, use `--loss-backend triton` with training or evaluation.
+Unsupported requests fail with instructions to select `--loss-backend pytorch`.
+See [kernel support, installation and correctness checks](docs/fused-cross-entropy.md).
+
+```bash
+python scripts/train.py --loss-backend triton --precision bf16 --output-dir runs/triton-training
+python scripts/benchmark_loss.py --output-dir runs/loss-benchmark
+python scripts/run_experiments.py --plan experiments/fused-cross-entropy.json --output-dir runs/loss-updates
+```
+
+On an RTX 2070, use FP32 or FP16; BF16 requires newer hardware. Start with a
+smaller microbatch; this example keeps the default effective batch of 64:
+
+```bash
+python scripts/train.py --loss-backend triton --precision fp16 --batch-size 1 --gradient-accumulation-steps 64 --output-dir runs/2070-triton
+```
+
+Run the GPU correctness checks in the [kernel guide](docs/fused-cross-entropy.md)
+before relying on the backend; RTX 2070 execution remains unverified here.
+
+The first benchmark measures loss operations; the experiment plan compares
+complete optimiser updates. Both write `report.json` and `report.md`.
 
 For sequential comparisons, edit a copy of the
 [example plan](experiments/implementations.json), then inspect, run, or resume it:

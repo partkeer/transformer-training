@@ -7,6 +7,7 @@ import torch
 
 from .checkpoint import capture_rng, restore_rng
 from .evaluation import autocast_context, move_batch, next_token_loss
+from .loss import model_loss_backend
 from .measurements import digest
 
 
@@ -14,7 +15,8 @@ def capture_attention(model, batches, *, device, precision, environment, backwar
     """Profile representative batch shapes outside measured timing to identify
     attention operators, optionally including backward but no optimiser step. Return
     evidence tied to settings and environment, reject contradictory forced-backend
-    observations, and restore original gradients, RNG, and model mode.
+    observations, use the model's selected loss backend, and restore original
+    gradients, RNG, and model mode.
     """
     if model.implementation.attention == "reference":
         return {"status": "reference", "observed": ["explicit"], "scope": "training forward/backward" if backward else "evaluation forward"}
@@ -33,7 +35,7 @@ def capture_attention(model, batches, *, device, precision, environment, backwar
             with torch.profiler.profile(activities=activities) as profiler, (nullcontext() if backward else torch.no_grad()):
                 with autocast_context(device, precision):
                     logits = model(batch["input_ids"], batch["attention_mask"])
-                    loss = next_token_loss(logits, batch["labels"])
+                    loss = next_token_loss(logits, batch["labels"], backend=model_loss_backend(model))
                 if backward:
                     loss.backward()
                 if device.type == "cuda":

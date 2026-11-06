@@ -1,10 +1,40 @@
 # Training measurements and controlled diagnostics
 
-These commands share one training update: masked next-token loss, AdamW,
+Training diagnostics share one update path: masked next-token loss, AdamW,
 accumulation, clipping, AMP policy and schedule. Execution switches select
-reference/SDPA attention, AMP, compilation, AdamW variants and activation
-checkpointing. They choose no custom kernel. Offline tests use tiny synthetic data;
-GPU performance and Nsight interoperability require verification on the GPU host.
+reference/SDPA attention, loss backend, precision, compilation, AdamW variants and
+activation checkpointing. Offline tests use tiny synthetic data; GPU performance
+and Nsight interoperability require verification on the GPU host.
+
+## Cross-entropy microbenchmarks
+
+`python scripts/benchmark_loss.py --output-dir runs/loss-benchmark` compares the
+public PyTorch/Triton loss on identical seeded quantised logits and labels, using
+the repository's autocast policy. The
+[`fused-cross-entropy` plan](../experiments/fused-cross-entropy.json) separately
+compares complete optimiser updates. See [support and commands](fused-cross-entropy.md).
+
+Each loss case/backend/repeat starts in a fresh process. Defaults are ten warm-ups,
+fifty measurements and five repeats. Correctness and JIT compilation precede
+timing. Samples use a host monotonic timer with CUDA synchronisation before and
+after each public operation. Input validation, including target-range readback,
+is included. Input creation, gradient reset and backward-only graph preparation
+are excluded. Forward-only uses no-grad; combined forward/backward includes
+autograd construction. Loss throughput counts supervised rows per operation.
+
+Reports retain case latency distributions, distributions of repeat medians,
+correctness errors, environment identity and failure reasons. Speedup is reference
+median latency divided by candidate median latency. Incomplete repeat groups have
+no speedup comparison. Correctness, operation speed and short-run stability are
+separate evidence; none establishes convergence.
+
+Allocator measurements use separate warmed passes. After setup, reset peaks and
+record baseline allocated/reserved bytes, peak allocated/reserved bytes and
+incremental peak allocated bytes. Backward-only baselines include their prepared
+forward graph; combined baselines contain inputs without a graph. Reserved bytes
+describe the caching allocator, not device-wide VRAM or fragmentation. Report
+speed and memory reductions separately. Unavailable reports never substitute zero
+for missing GPU measurements.
 
 ## Implementation experiment plans
 

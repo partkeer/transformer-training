@@ -3,9 +3,7 @@
 from contextlib import nullcontext
 
 import torch
-import torch.nn.functional as F
-
-IGNORE_INDEX = -100
+from .loss import IGNORE_INDEX, cross_entropy_sum, model_loss_backend, triton_launch_settings
 
 
 def autocast_context(device, precision):
@@ -26,13 +24,20 @@ def move_batch(batch, device):
     return {key: tensor.to(device, non_blocking=True) for key, tensor in batch.items()}
 
 
-def next_token_loss(logits, labels):
+def next_token_loss(logits, labels, *, backend="pytorch"):
     """Return summed cross-entropy over already-aligned next-token targets, ignoring
     -100 padding. Never shift labels again; callers divide by the total supervised-
-    token count for their accumulation or evaluation scope.
+    token count for their accumulation or evaluation scope. The default preserves
+    PyTorch behaviour; explicit Triton selection requires contiguous aligned inputs
+    and returns an FP32 sum. Do not silently copy unsupported Triton layouts.
     """
-    return F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1),
-                           ignore_index=IGNORE_INDEX, reduction="sum")
+    if backend == "triton" and (not logits.is_contiguous() or not labels.is_contiguous()):
+        raise ValueError("Triton logits and labels must be contiguous; select --loss-backend pytorch.")
+    if backend == "triton" and (logits.ndim < 2 or labels.shape != logits.shape[:-1]):
+        raise ValueError("Triton labels must match the leading logits dimensions.")
+    if backend == "triton":
+        triton_launch_settings(logits.size(-1))
+    return cross_entropy_sum(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), backend=backend)
 
 
 @torch.no_grad()
@@ -40,7 +45,8 @@ def evaluate(model, loader, *, device="cpu", precision="fp32", shape_examples=No
     """Return mean next-token loss and supervised-token count over the loader,
     including genuine EOS and excluding -100 padding. Sum losses before dividing to
     avoid overweighting short batches, restore model mode even on failure, and
-    optionally retain a CPU batch for each observed shape.
+    optionally retain a CPU batch for each observed shape. Inherit the model's loss
+    backend, defaulting modules without implementation settings to PyTorch.
     """
     was_training = model.training
     model.eval()
@@ -54,7 +60,7 @@ def evaluate(model, loader, *, device="cpu", precision="fp32", shape_examples=No
             batch = move_batch(cpu_batch, device)
             with autocast_context(device, precision):
                 logits = model(batch["input_ids"], batch["attention_mask"])
-                loss = next_token_loss(logits, batch["labels"])
+                loss = next_token_loss(logits, batch["labels"], backend=model_loss_backend(model))
             if not torch.isfinite(loss):
                 raise FloatingPointError("Nonfinite validation loss")
             total_loss += loss.double()

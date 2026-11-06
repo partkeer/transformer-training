@@ -43,7 +43,8 @@ def build_parser():
 def main(argv=None):
     """Parse options, configure offline mode before data imports, and run checkpoint
     evaluation. Print metrics and continuations without duplicating complete text,
-    returning zero on success or reporting a CLI error.
+    returning zero on success or reporting a CLI error. Pass explicit loss backend
+    selection through the same checkpoint implementation-override path.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -53,7 +54,7 @@ def main(argv=None):
     options = vars(args).copy()
     options.pop("offline")
     implementation_options = {key: options.pop(key) for key in
-                              ("attention", "sdpa_backend", "compile", "compile_mode")}
+                              ("attention", "sdpa_backend", "compile", "compile_mode", "loss_backend")}
     options["implementation_overrides"] = {k: v for k, v in implementation_options.items() if v is not None}
     try:
         from .quality import evaluate_checkpoint, _samples_text

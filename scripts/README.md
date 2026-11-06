@@ -1,5 +1,9 @@
 # TinyStories commands
 
+For the optional fused loss, see [kernel commands and support](../docs/fused-cross-entropy.md).
+`benchmark_loss.py` measures loss operations; `run_experiments.py --plan
+experiments/fused-cross-entropy.json` measures complete optimiser updates.
+
 Training measurement tools are documented in
 [the measurement guide](../docs/measurements.md):
 
@@ -20,7 +24,8 @@ documents execution switches, running the suite, reports and resume.
 .\.venv\Scripts\python.exe scripts\report_measurements.py --run-dir runs\my-run
 ```
 
-Run these PowerShell commands from the repository root using Python 3.14.
+Run these PowerShell commands from the repository root using Python 3.12.
+Use Linux/WSL2 for the Triton backend; native Windows supports the PyTorch backend.
 
 ```powershell
 # Create the environment if needed, then install the package in editable mode.

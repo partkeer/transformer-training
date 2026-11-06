@@ -20,6 +20,7 @@ from .config import ImplementationConfig, ModelConfig, TrainingConfig
 from .implementations import (compiler_snapshot, compilation_changed, execution_report,
                               configure_restored_optimizer, file_sha256, optimizer_flags)
 from .evaluation import IGNORE_INDEX, autocast_context, evaluate, move_batch, next_token_loss
+from .loss import model_loss_backend, validate_loss_backend
 from .model import DecoderOnlyTransformer
 from .measurements import Invocation, Phases, DeviceMemorySampler, source_identity, unavailable
 
@@ -86,18 +87,26 @@ def clip_gradients(parameters, max_norm, *, allow_nonfinite_gradients=False):
 
     A nonfinite norm with finite gradient elements is a separate reduction
     overflow. Abort before clipping can zero those gradients or step the optimizer.
+    Use the public PyTorch 2.6 clipping API, which checks the norm before mutation.
+    Recompute a failed norm only to classify overflow and preserve AMP handling.
     """
     parameters = list(parameters)
-    gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(gradients)
-    if not torch.isfinite(total_norm):
+    try:
+        return torch.nn.utils.clip_grad_norm_(parameters, max_norm, error_if_nonfinite=True)
+    except RuntimeError:
+        gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+        if not gradients:
+            raise
+        total_norm = torch.linalg.vector_norm(torch.stack([
+            torch.linalg.vector_norm(gradient).to(gradients[0].device) for gradient in gradients
+        ]))
+        if torch.isfinite(total_norm):
+            raise
         nonfinite = any(not torch.isfinite(gradient).all() for gradient in gradients)
         if allow_nonfinite_gradients and nonfinite:
             return total_norm
         raise NumericalFailure("nonfinite_gradients" if nonfinite else "gradient_norm_overflow",
-                               "Nonfinite gradient norm; stopping before optimizer update")
-    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm)
-    return total_norm
+                               "Nonfinite gradient norm; stopping before optimizer update") from None
 
 
 def validate_device(config):
@@ -125,16 +134,20 @@ def validate_device(config):
 def seed_everything(seed):
     """Seed Python and PyTorch CPU/CUDA generators and configure IEEE FP32 math without
     cuDNN autotuning. These settings support reproducible comparisons but do not
-    promise cross-platform bitwise identity.
+    promise cross-platform bitwise identity. Select the precision-control API
+    available in PyTorch 2.6 or newer without mixing old and new controls.
     """
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     torch.set_float32_matmul_precision("highest")
-    # Use one precision-control API consistently (PyTorch >= 2.9).
-    torch.backends.cuda.matmul.fp32_precision = "ieee"
-    torch.backends.cudnn.conv.fp32_precision = "ieee"
+    if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+        torch.backends.cuda.matmul.fp32_precision = "ieee"
+        torch.backends.cudnn.conv.fp32_precision = "ieee"
+    else:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
 
 
@@ -251,7 +264,8 @@ def accumulate_gradients(model, batches, *, device="cpu", precision="fp32", scal
     Divide each microbatch's summed loss by the group's total valid-target count,
     so short or padded batches are not overweighted. Optionally scale for AMP,
     reject empty/nonfinite objectives, and return loss/token/example statistics
-    without retaining microbatch graphs. The caller clears gradients and steps.
+    without retaining microbatch graphs. Inherit the model's loss backend; plain
+    modules use PyTorch. The caller clears gradients and steps.
     """
     phases = phases or Phases()
     with phases.range("data_preparation"):
@@ -264,7 +278,7 @@ def accumulate_gradients(model, batches, *, device="cpu", precision="fp32", scal
             batch = move_batch(cpu_batch, device)
         with phases.range("forward_loss"), autocast_context(device, precision):
             logits = model(batch["input_ids"], batch["attention_mask"])
-            loss = next_token_loss(logits, batch["labels"])
+            loss = next_token_loss(logits, batch["labels"], backend=model_loss_backend(model))
         if not torch.isfinite(loss):
             raise FloatingPointError("Nonfinite training loss; stopping before optimizer update")
         normalised = loss / tokens
@@ -321,7 +335,10 @@ def data_signature(metadata):
 def environment(device):
     """Return software versions, source identity, precision controls, and device
     details for interpreting measurements. Include CUDA GPU properties and attempt
-    to read the driver version; an unavailable driver query yields None.
+    to read the driver version; an unavailable driver query yields None. Report the
+    optional Triton distribution without importing it or requiring its presence.
+    Express the legacy PyTorch 2.6 TF32 switch using the same precision label as
+    newer releases so reports describe the applied math policy consistently.
     """
     result = {
         "python": platform.python_version(), "platform": platform.platform(),
@@ -329,10 +346,17 @@ def environment(device):
                      ("torch", "datasets", "tokenizers", "huggingface-hub")},
         "cuda_build": torch.version.cuda, "cudnn": torch.backends.cudnn.version(),
         "device": str(device), "matmul_precision": torch.get_float32_matmul_precision(),
-        "cuda_matmul_fp32_precision": torch.backends.cuda.matmul.fp32_precision,
+        "cuda_matmul_fp32_precision": (
+            torch.backends.cuda.matmul.fp32_precision
+            if hasattr(torch.backends.cuda.matmul, "fp32_precision") else
+            "tf32" if torch.backends.cuda.matmul.allow_tf32 else "ieee"),
         "torch_threads": torch.get_num_threads(),
         "source": source_identity(),
     }
+    try:
+        result["packages"]["triton"] = importlib.metadata.version("triton")
+    except importlib.metadata.PackageNotFoundError:
+        result["packages"]["triton"] = None
     if device.type == "cuda":
         props = torch.cuda.get_device_properties(device)
         result.update(gpu=props.name, gpu_memory_bytes=props.total_memory,
@@ -360,7 +384,8 @@ class Trainer:
                  output_dir, *, resume=None, preparation_seconds=None, diagnostic=False,
                  implementation=None):
         """Validate prepared loaders and execution settings, create run artifacts, and
-        construct the model, optimiser, scheduler, scaler, and counters. Optionally
+        construct the model, optimiser, scheduler, scaler, and counters. Validate
+        the loss runtime before output creation. Optionally
         restore a compatible checkpoint while deferring RNG restoration until loader
         setup.
         """
@@ -380,6 +405,7 @@ class Trainer:
         self.prior_active_seconds = 0.0
         self.model_config, self.config, self.loaders = model_config, config, loaders
         self.device = validate_device(config)
+        validate_loss_backend(self.implementation.loss_backend, self.device, model_config.vocab_size)
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
         if (loaders.metadata["sequence_length"] != model_config.sequence_length

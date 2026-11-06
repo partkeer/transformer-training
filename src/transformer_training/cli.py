@@ -58,7 +58,8 @@ def main(argv=None):
     """Resolve options, inherit compatible checkpoint settings, and run the shared
     trainer, returning zero on success. Configure offline mode before data imports;
     dry-run prints settings and CPU model size without data access, CUDA
-    initialisation, or output creation.
+    initialisation, Triton import, or output creation. Real runs check the selected
+    loss runtime before loading data or creating artifacts.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -116,6 +117,9 @@ def main(argv=None):
                                         "%Y%m%dT%H%M%S%fZ"))
         validate_output_directory(output, resume=args.resume)
         validate_device(training_config)  # Fail before downloads if CUDA setup is missing.
+        from .loss import validate_loss_backend
+
+        validate_loss_backend(implementation.loss_backend, training_config.device, model_config.vocab_size)
 
         options = {
             "sequence_length": model_config.sequence_length,

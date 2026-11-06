@@ -6,8 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "transformer-training"
 version = "0.1.0"
 description = "A small, measurable TinyStories transformer training system"
-requires-python = ">=3.14"
+requires-python = ">=3.12,<3.14"
 dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+triton = ["triton==3.2.0; sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}

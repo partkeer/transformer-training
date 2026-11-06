@@ -14,6 +14,7 @@ class ImplementationConfig:
     compile_mode: str = "default"
     optimizer_implementation: str = "standard"
     activation_checkpointing: bool = False
+    loss_backend: str = "pytorch"
 
     def __post_init__(self):
         """Reject unknown execution choices, nonboolean switches, and backend or
@@ -25,6 +26,7 @@ class ImplementationConfig:
             "compile_mode": {"default", "reduce-overhead", "max-autotune",
                              "max-autotune-no-cudagraphs"},
             "optimizer_implementation": {"standard", "foreach", "fused"},
+            "loss_backend": {"pytorch", "triton"},
         }
         for name, allowed in choices.items():
             if getattr(self, name) not in allowed:

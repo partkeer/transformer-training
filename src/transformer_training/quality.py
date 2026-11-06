@@ -13,6 +13,7 @@ from .generation import DEFAULT_PROMPTS, encode_prompt, generate, validate_gener
 from .model import DecoderOnlyTransformer
 from .implementations import resolve_implementation, execution_report
 from .training import CHECKPOINT_VERSION, environment, validate_device
+from .loss import validate_loss_backend
 
 
 def loss_metrics(result):
@@ -81,7 +82,8 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
 
     Configure HF_HOME/offline mode before importing Hugging Face libraries (the
     CLI does this). Returns the report dictionary and creates no optimizer.
-    Operational overrides affect evaluation only, not the input checkpoint.
+    Operational overrides, including the loss backend, affect evaluation only, not
+    the input checkpoint. Check loss runtime support before loading validation data.
     """
     checkpoint = Path(checkpoint).resolve()
     payload = load_checkpoint(checkpoint)
@@ -90,7 +92,7 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
     model_config = ModelConfig(**payload["model_config"])
     training_config = TrainingConfig(**payload["training_config"])
     import argparse
-    allowed = {"attention", "sdpa_backend", "compile", "compile_mode"}
+    allowed = {"attention", "sdpa_backend", "compile", "compile_mode", "loss_backend"}
     if set(implementation_overrides or {}) - allowed:
         raise ValueError("Unsupported evaluation implementation override")
     implementation = resolve_implementation(argparse.Namespace(**(implementation_overrides or {})), payload)
@@ -100,6 +102,7 @@ def evaluate_checkpoint(checkpoint, *, output_dir=None, device=None, precision=N
             overrides[key] = value
     config = replace(training_config, **overrides)
     target_device = validate_device(config)  # Fail before any Hub requests.
+    validate_loss_backend(implementation.loss_backend, target_device, model_config.vocab_size)
     signature = payload["data_signature"]
     for key in ("revision", "tokenizer_revision"):
         if not isinstance(signature[key], str) or not re.fullmatch(r"[0-9a-f]{40}", signature[key]):

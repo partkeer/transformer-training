@@ -60,7 +60,7 @@ def resolve_request(args, argv):
 def worker(request):
     """Configure offline mode, prepare data, build an isolated trainer, and execute one
     resolved trial request. Write completion/failure status for trial execution and
-    return its result.
+    return its result. Check the loss backend before any data preparation.
     """
     if request["offline"]:
         os.environ["HF_HUB_OFFLINE"] = os.environ["HF_DATASETS_OFFLINE"] = "1"
@@ -72,6 +72,10 @@ def worker(request):
 
     config = TrainingConfig(**request["training"])
     validate_device(config)
+    from .loss import validate_loss_backend
+
+    validate_loss_backend(ImplementationConfig(**request.get("implementation", {})).loss_backend,
+                          config.device, request["model"]["vocab_size"])
     start = time.perf_counter()
     loaders = load_tinystories(**request["data_options"])
     preparation = time.perf_counter() - start
@@ -122,7 +126,8 @@ def main(kind="benchmark", argv=None):
     """Parse benchmark/profile commands and return an exit status after running
     isolated trials, importing captures, or printing a side-effect-free dry-run
     request. Protect occupied destinations and keep profiler captures separate from
-    benchmark statistics.
+    benchmark statistics. Validate the loss runtime only after the dry-run return
+    and before creating output directories or launching workers.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -183,6 +188,10 @@ def main(kind="benchmark", argv=None):
             os.environ["HF_HUB_OFFLINE"] = os.environ["HF_DATASETS_OFFLINE"] = "1"
         from .training import validate_device
         validate_device(TrainingConfig(**request["training"]))
+        from .loss import validate_loss_backend
+
+        validate_loss_backend(request["implementation"]["loss_backend"], request["training"]["device"],
+                              request["model"]["vocab_size"])
         if kind == "profile" and args.backend in {"nsys", "ncu", "all"} and request["training"]["device"] == "cpu":
             raise ValueError("Nsight backends require CUDA; select pytorch or memory for CPU diagnostics")
         output.mkdir(parents=True, exist_ok=True)
