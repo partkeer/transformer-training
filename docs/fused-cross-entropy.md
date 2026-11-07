@@ -115,12 +115,14 @@ python scripts/run_experiments.py --plan experiments/fused-cross-entropy.json --
 ```
 
 For an RTX 2070, run the acceptance tests above, then use FP16 or FP32 instead of
-BF16. A smaller microbatch is a starting point for 8 GB VRAM, not a verified fit:
+BF16. The recorded RTX 2070 SUPER run has unresolved FP16 optimiser-update
+acceptance failures; see [measured results](#rtx-2070-super-measured-results).
+A smaller microbatch is a starting point for 8 GB VRAM, not a verified fit:
 
 ```bash
 # Effective batch remains 1 * 64 = 64 examples.
 python scripts/train.py --loss-backend triton --precision fp16 --batch-size 1 --gradient-accumulation-steps 64 --output-dir runs/2070-triton
-python scripts/benchmark_loss.py --precisions fp32 fp16 --output-dir runs/2070-loss
+python scripts/benchmark_loss.py --rows 512 257 --precisions fp32 fp16 --output-dir runs/2070-loss
 ```
 
 The supplied update plan includes BF16 variants. For Turing, use a copy with those
@@ -164,7 +166,88 @@ kernel variants into SM75 cubins: forward/backward in FP32/FP16 at vocabulary
 sizes 1, 33, 2,048, 2,049, 8,192, 8,193, 32,768, 32,769, 50,257 and 65,536.
 This checks compiler compatibility without loading or executing kernels on a GPU.
 
-**GPU execution, numerical correctness, speed and memory measurements remain
-unverified.** CPU wiring/reference checks and offline compilation do not establish
-those properties. Run the CUDA acceptance tests on the RTX 2070 before relying
-on this backend. Earlier profiles motivate the target but do not measure it.
+## RTX 2070 SUPER measured results
+
+The supplied GPU artifacts are in `runs/fused-cross-entropy-remote/`: the
+[loss report](../runs/fused-cross-entropy-remote/2070-loss/report.md), detailed
+[JSON results](../runs/fused-cross-entropy-remote/2070-loss/report.json), and
+[verification logs](../runs/fused-cross-entropy-remote/verification-logs/).
+They establish GPU execution and loss-operation speed/memory improvements, with
+unresolved FP16 acceptance failures. The recorded environment is Linux x86-64,
+Python 3.12.16, PyTorch `2.6.0+cu118`, Triton `3.2.0`, and an RTX 2070 SUPER
+with 8 GB VRAM and compute capability 7.5. Git source identity was unavailable
+in the report, so the artifacts do not identify the exact tested commit.
+
+### Loss-operation speed and memory
+
+The measured protocol uses `V=50,257`, `N=512` and `N=257`, FP32/FP16, ignored
+fractions 0 and 0.5, seed 42, and upstream gradient 1. Each configuration has
+five fresh-process repeats, ten warm-ups and fifty measurements per operation.
+Rows are next-token prediction positions, not sequence length: for example,
+`512 = 1 sequence * 512 positions`. Timings synchronise CUDA and include public
+loss validation; setup, resets and compilation are excluded. Memory is measured
+in separate warmed passes. Reported times are medians of repeat medians.
+
+| Rows | Precision | Ignored targets | PyTorch F+B ms | Triton F+B ms | Speedup | Peak allocated MiB, PyTorch / Triton |
+|---:|---|---:|---:|---:|---:|---:|
+| 512 | FP32 | 0% | 2.3922 | 1.1892 | 2.012x | 392.64 / 196.33 |
+| 512 | FP32 | 50% | 2.3918 | 0.9715 | 2.462x | 392.64 / 196.33 |
+| 512 | FP16 | 0% | 2.0559 | 0.8108 | 2.536x | 296.32 / 100.01 |
+| 512 | FP16 | 50% | 2.0558 | 0.7619 | 2.698x | 296.32 / 100.01 |
+| 257 | FP32 | 0% | 1.2214 | 0.7898 | 1.547x | 200.00 / 100.01 |
+| 257 | FP32 | 50% | 1.2205 | 0.7427 | 1.643x | 200.00 / 100.01 |
+
+Completed comparisons show 1.55--2.70x faster loss forward/backward. At 512 rows,
+peak allocated memory falls by 196.31 MiB: approximately 50% in FP32 and 66.2%
+in FP16. These peaks include input tensors and describe the isolated loss
+workload, not whole-model or device-wide memory. Avoiding vocabulary-sized
+intermediate tensors is consistent with the savings. Ignored rows reduce Triton
+time because their vocabulary calculations are skipped, although a full gradient
+tensor is still allocated and written.
+
+At 257 FP16 rows, Triton completes at 0.5805 ms (0% ignored) and 0.5568 ms
+(50% ignored), with 49.28 MiB peak allocation. The matching PyTorch cases fail
+the correctness gate before timing, so no speedup is available for those pairs.
+
+### Correctness and remaining acceptance failures
+
+All 40 Triton benchmark case/repeat checks pass against FP32 PyTorch on identical
+quantised logits. Maximum recorded summed-loss error is 0.000977 in both
+precisions; maximum logits-gradient error is `9.31e-10` in FP32 and `2.38e-7`
+in FP16. Repeats use the same seed and inputs. The separate GPU tests also pass
+shape/boundary, extreme-value, ignored-target, retained-graph and upstream-scale
+checks. BF16 execution is not tested on this GPU.
+
+The benchmark is nevertheless **incomplete**: all ten PyTorch FP16 repeats at
+257 rows fail the loss tolerance against the FP32 reference. Absolute summed-loss
+differences are 0.03589 without ignored targets and 0.04236 with 50% ignored;
+relative differences are approximately `1.25e-5` and `2.93e-5`. This is a
+reference/tolerance discrepancy requiring investigation, not a Triton failure
+or an accepted timing comparison.
+
+The [acceptance log](../runs/fused-cross-entropy-remote/verification-logs/test-loss.txt)
+records 24 tests with two failing FP16 integration subcases, eager and compiled.
+Both fail when comparing model parameters after optimiser updates: the reported
+48-element tensor has 1 mismatch with maximum absolute error 0.000203 in eager
+mode, and 2 mismatches with maximum error 0.000245 in compiled mode. The absolute
+tolerance is 0.0002 (`rtol=0.01`). FP32 integration has no reported failures.
+These small absolute discrepancies remain unresolved acceptance failures;
+isolated loss/gradient agreement does not establish equivalent FP16 updates.
+The cause is not established by these artifacts.
+
+### Training smoke and interpretation limits
+
+The [training smoke log](../runs/fused-cross-entropy-remote/verification-logs/training-smoke.txt)
+records five successful Triton updates, no skipped updates or reported numerical
+failures, completed validation and checkpoint writes, and about 366 MiB peak
+allocated memory for that run's configuration. Training batch loss moves from
+10.849 to 10.391 across different batches; validation loss is 10.404 over 57,374
+supervised tokens. This is an operational smoke check, not convergence evidence.
+
+The smoke run has no matched PyTorch baseline and no post-warm-up measured
+attempts: all five updates fall within its ten-update warm-up. Complete-update
+speedup, whole-training memory savings, sustained stability and paired validation
+quality remain unmeasured. Resolve the FP16 integration failures and reference
+discrepancy, then use matched complete-update benchmarks and a longer paired
+quality comparison before claiming training-level gains. Earlier profiles
+motivate this target; the measurements above establish loss-only gains.
