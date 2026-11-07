@@ -36,6 +36,122 @@ describe the caching allocator, not device-wide VRAM or fragmentation. Report
 speed and memory reductions separately. Unavailable reports never substitute zero
 for missing GPU measurements.
 
+## One versus two GPU scaling
+
+`scripts/benchmark_gpu_scaling.py` compares one ordinary model process with two
+DistributedDataParallel (DDP) processes on one Linux/WSL2 CUDA/NCCL host. It invokes
+`python -m torch.distributed.run --standalone` automatically. The baseline uses
+the first visible GPU; DDP uses the first two. Set `CUDA_VISIBLE_DEVICES` before
+launch to choose them. Both GPUs must support the requested precision and loss
+backend. This command does not support checkpoint loading, resume, multi-host
+execution, or ordinary distributed training.
+
+### Fixed workload and reproducibility
+
+`--batch-size` is the microbatch size **per GPU**. The accumulation argument is
+the **one-GPU** count and must be even and at least two. With world size `W`,
+the local accumulation count is `A/W`, giving the same global examples per update:
+
+```text
+global batch = W × batch_size × local_accumulation = batch_size × A
+one GPU:  1 × 8 × 8 = 64 examples
+two GPUs: 2 × 8 × 4 = 64 examples
+```
+
+The comparison uses identical initial weights, pinned data/tokenizer revisions,
+selection, deterministic global example groups, optimiser/precision/execution
+settings and schedule horizon. It records an initial-weight checksum, a hash of
+real sample indices and update boundaries, data fingerprints, source identity,
+software versions, GPU UUIDs, topology when available and actual consumed counts.
+Whole microbatches are assigned alternately to ranks within each global update.
+Per-rank loader workers and CPU compute threads are constant; total loader workers
+therefore double. This is recorded as part of the scaling setup. `--torch-threads`
+defaults to one, with matching OMP/MKL settings in both jobs.
+
+Partial final microbatches and accumulation groups are retained. Ranks execute the
+same number of local microbatches; a missing slot uses valid dummy inputs with all
+labels ignored. These slots contribute no supervised tokens, real examples or
+padding slots. No real sample is duplicated for supervision or silently dropped.
+If all requested attempts do not fit the configured epochs and maximum updates,
+the command fails rather than repeating data outside the specified schedule.
+
+For each update, token counts are summed across ranks before backward. Each
+microbatch's summed loss is multiplied by `W / global_supervised_tokens`. DDP's
+gradient average then equals the gradient of the total loss divided by the total
+number of supervised tokens. Averaging rank-local mean losses would be wrong when
+padding differs. Both forward and backward of nonfinal accumulation microbatches
+use `no_sync()`; the final pair synchronises accumulated gradients. Clipping and
+AMP follow the shared training update path; ranks verify skip/scaler/scheduler
+agreement. EOS targets remain supervised and labels are not shifted again.
+
+Each repeat starts from the same seeded model; dropout receives reproducible
+rank-specific seeds after construction. Different dropout streams and floating-
+point reduction order mean matching sample groups do not promise bitwise-identical
+trajectories or validation losses. Dropout-free synthetic gradient/update checks
+test the mathematical equivalence separately.
+
+### Timing, throughput and memory
+
+Defaults are five fresh-process repeats per GPU count, ten warm-up attempts and
+fifty measured attempts. Order alternates: one then two GPUs in odd repeats,
+two then one in even repeats. Each attempt includes data delivery, transfers,
+global token/loss reductions, forward, backward, gradient communication, clipping,
+AMP/optimiser, scheduler and rank-state agreement checks. CUDA is synchronised
+before and after each attempt. Ranks align before the measured window. The full
+window includes bookkeeping between attempts and any epoch transition; trial
+setup, warm-up, validation, diagnostic evidence capture and writing are excluded.
+
+For rank-local measured-window durations `t_r`, use `T = max(t_r)`. Global counts
+are already reduced and are counted once, not summed again across rank reports:
+
+```text
+useful tokens/s    = globally applied supervised tokens / T
+processed tokens/s = all globally processed supervised tokens / T
+speedup            = median(two-GPU useful tokens/s) / median(one-GPU useful tokens/s)
+two-GPU efficiency = speedup / 2
+```
+
+An attempt counts a complete accumulation group, including a skipped AMP update.
+Useful throughput excludes skipped-update tokens; processed throughput includes
+them. Each attempt's latency is the maximum duration across ranks; the report
+summarises repeat medians and retains individual records. Synchronised attempt
+timing measures update performance, not full-training elapsed time or time to a
+target validation loss. Small models can be slower with two GPUs because
+communication and coordination may outweigh the saved compute.
+
+Allocator peak statistics are reset after warm-up and read before validation.
+Reports retain allocated/reserved peaks per GPU, their maximum and their sum.
+The sum is a sum of individual peaks, not a simultaneous device-wide VRAM peak.
+It includes model/optimiser state and DDP buffers; it does not measure allocations
+outside PyTorch's allocator or the full device usage reported by `nvidia-smi`.
+DDP replicates model/optimiser state, so two GPUs do not combine into one larger
+model memory pool. Preserving local microbatch size need not reduce per-GPU VRAM.
+
+### Validation, eligibility and artifacts
+
+After timing, rank zero's unwrapped model uses the shared evaluator on the first
+32 validation batches by default. The selection, batch size and token count are
+recorded and match across configurations. This is a bounded sanity check, not a
+convergence result. `--validation-batches 0` skips it; `--full-validation` evaluates
+the whole selected split. `--max-stories` still applies to the prepared selection.
+Validation and attention dispatch evidence capture do not enter the speed window
+or measured allocator peaks.
+
+The report withholds speedup and efficiency for incomplete repeats, changed
+conditions, mismatched consumed work, skipped updates, heterogeneous GPUs,
+unverified GPU identities, or compilation during measurement/unavailable compiler
+telemetry. Raw measurements remain available. Each job has a time limit, defaults
+to 1800 seconds including setup/validation, and cleans up its process tree on
+failure or timeout. Increase `--timeout-seconds` for slow/full validation workloads.
+
+Outputs include `report.md`, `report.json`, `report.csv`, the resolved request,
+audited data metadata, preparation duration and hardware topology. Each repeat/GPU
+directory retains its request, `worker.log`, torchrun rank stdout/stderr logs,
+per-rank `result.json`/failure evidence and global `trial.json`. Failed jobs cannot
+produce a valid speedup; partial suite reports have an explicit failed status.
+Use a fresh output directory after failures or changes; suite resume is not
+supported. Dry-run performs configuration resolution only and works on CPU hosts.
+
 ## Implementation experiment plans
 
 `scripts/run_experiments.py` accepts version 1 JSON plans. See

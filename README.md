@@ -149,6 +149,32 @@ directory after changing the plan, source, or environment. See the
 [measurement guide](docs/measurements.md#implementation-experiment-plans)
 for plan configuration and optional quality runs.
 
+## Compare one and two GPUs
+
+On one Linux/WSL2 machine with two NVIDIA GPUs and CUDA/NCCL-enabled PyTorch:
+
+```bash
+# Inspect settings without data access, CUDA initialisation or output creation.
+python scripts/benchmark_gpu_scaling.py --dry-run
+
+# Run real updates, keeping the global batch at 64 examples in both cases.
+CUDA_VISIBLE_DEVICES=0,1 python scripts/benchmark_gpu_scaling.py \
+  --batch-size 8 --gradient-accumulation-steps 8 \
+  --repeats 5 --warmup-attempts 10 --measured-attempts 50 \
+  --validation-batches 32 --output-dir runs/gpu-scaling
+```
+
+Accumulation is the **one-GPU** setting; two GPUs use half as many accumulation
+steps per GPU with the same microbatch size. It must be even and at least two.
+Existing precision and implementation switches, including `--loss-backend triton`,
+are supported. Reduce `--batch-size` and increase accumulation if needed for VRAM.
+
+Open `runs/gpu-scaling/report.md` for speedup, efficiency, memory and loss checks;
+JSON/CSV and per-rank logs retain the measurements. Validation runs after timing;
+use `--validation-batches 0` to skip it or `--full-validation` for the selected split.
+This command benchmarks updates; ordinary training/resume remains single-GPU.
+See [comparison rules and metrics](docs/measurements.md#one-versus-two-gpu-scaling).
+
 ## Measure speed and memory
 
 These diagnostics perform real training updates and need fresh output directories:

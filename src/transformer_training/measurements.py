@@ -28,12 +28,20 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def source_identity():
+def source_identity(*, exclude_paths=()):
     """Return the Git revision, dirty flag, and hash of tracked and nonignored
     untracked file contents, including deletion markers. Return an unavailable
-    record if Git or filesystem reads fail.
+    record if Git or filesystem reads fail. Optionally exclude generated output
+    directories from both status and content hashing, so live logs in a custom
+    nonignored destination cannot masquerade as changed source.
     """
     root = Path(__file__).resolve().parents[2]
+    pathspec = []
+    for excluded in exclude_paths:
+        path = Path(excluded).resolve()
+        if path.is_relative_to(root):
+            pathspec.append(':(top,exclude,literal)' + path.relative_to(root).as_posix())
+    pathspec = ['--', '.', *pathspec] if pathspec else []
     def git(*args):
         """Run a bounded read-only Git command in the repository and return stripped
         output, using a command-local ownership exception without changing global
@@ -43,10 +51,10 @@ def source_identity():
             ["git", "-c", f"safe.directory={root.as_posix()}", *args],
             cwd=root, text=True, stderr=subprocess.DEVNULL, timeout=10).strip()
     try:
-        revision, status = git("rev-parse", "HEAD"), git("status", "--porcelain")
+        revision, status = git("rev-parse", "HEAD"), git("status", "--porcelain", *pathspec)
         # Include untracked source contents, not just the tracked diff.
-        files = sorted(set(git("ls-files").splitlines() +
-                           git("ls-files", "--others", "--exclude-standard").splitlines()))
+        files = sorted(set(git("ls-files", *pathspec).splitlines() +
+                           git("ls-files", "--others", "--exclude-standard", *pathspec).splitlines()))
         contents = hashlib.sha256()
         for name in files:
             path = root / name

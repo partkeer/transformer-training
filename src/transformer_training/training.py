@@ -1,5 +1,6 @@
 """Single-GPU reference training, token-weighted accumulation and exact data resume."""
 
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime, timezone
 import importlib.metadata
@@ -258,52 +259,71 @@ def make_optimizer(model, config, implementation=None):
 
 
 def accumulate_gradients(model, batches, *, device="cpu", precision="fp32", scaler=None,
-                         phases=None):
+                         phases=None, distributed=None):
     """Accumulate gradients weighted by all supervised tokens in the batch group.
 
     Divide each microbatch's summed loss by the group's total valid-target count,
     so short or padded batches are not overweighted. Optionally scale for AMP,
     reject empty/nonfinite objectives, and return loss/token/example statistics
     without retaining microbatch graphs. Inherit the model's loss backend; plain
-    modules use PyTorch. The caller clears gradients and steps.
+    modules use PyTorch. An explicit distributed context normalises against global
+    tokens, compensates for DDP gradient averaging, and synchronises only the last
+    forward/backward pair. Dummy forwards carry no supervision or workload counts.
+    The caller clears gradients and steps.
     """
     phases = phases or Phases()
     with phases.range("data_preparation"):
         tokens = sum(int((batch["labels"] != IGNORE_INDEX).sum()) for batch in batches)
+        if distributed is not None:
+            tokens = int(distributed.sum([tokens])[0])
     if not tokens:
         raise ValueError("Accumulation group contains no supervised tokens")
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
-    for cpu_batch in batches:
+    for index, cpu_batch in enumerate(batches):
         with phases.range("transfer"):
             batch = move_batch(cpu_batch, device)
-        with phases.range("forward_loss"), autocast_context(device, precision):
-            logits = model(batch["input_ids"], batch["attention_mask"])
-            loss = next_token_loss(logits, batch["labels"], backend=model_loss_backend(model))
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Nonfinite training loss; stopping before optimizer update")
-        normalised = loss / tokens
-        with phases.range("backward"):
-            (scaler.scale(normalised) if scaler is not None else normalised).backward()
+        context = (distributed.accumulation_context(model, index == len(batches) - 1)
+                   if distributed is not None else nullcontext())
+        with context:
+            with phases.range("forward_loss"), autocast_context(device, precision):
+                logits = model(batch["input_ids"], batch["attention_mask"])
+                loss = next_token_loss(logits, batch["labels"], backend=model_loss_backend(model))
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite training loss; stopping before optimizer update")
+            normalised = loss / tokens
+            if distributed is not None and distributed.world_size > 1:
+                normalised = normalised * distributed.world_size
+            with phases.range("backward"):
+                (scaler.scale(normalised) if scaler is not None else normalised).backward()
         loss_sum += loss.detach().double()
         del logits, loss, normalised, batch
-    return {"loss_sum": loss_sum.item(), "supervised_tokens": tokens,
-            "slots": sum(batch["labels"].numel() for batch in batches),
-            "examples": sum(len(batch["labels"]) for batch in batches)}
+    examples = sum(int((~batch['_scaling_dummy']).sum()) if '_scaling_dummy' in batch
+                   else len(batch['labels']) for batch in batches)
+    slots = sum((int((~batch['_scaling_dummy']).sum()) * batch['labels'].shape[1])
+                if '_scaling_dummy' in batch else batch['labels'].numel() for batch in batches)
+    stats = [loss_sum.item(), slots, examples]
+    if distributed is not None:
+        stats = distributed.sum(stats)
+    return {"loss_sum": stats[0], "supervised_tokens": tokens,
+            "slots": int(stats[1]), "examples": int(stats[2])}
 
 
-def optimizer_attempt(model, optimizer, scaler, scheduler, batches, config, device, *, phases=None):
+def optimizer_attempt(model, optimizer, scaler, scheduler, batches, config, device, *,
+                      phases=None, distributed=None):
     """Attempt one shared accumulated optimiser update and return its statistics.
 
     Clear gradients, backpropagate token-weighted loss, unscale and clip, then
     invoke the scaler/optimiser. Advance the schedule only when AMP applies the
     update; return skip/scale metadata so callers account for consumed work.
-    Training, benchmarks, and profilers all use this path.
+    Training, benchmarks, and profilers all use this path. Opted-in distributed
+    attempts return global workload statistics and check rank agreement on AMP
+    skip/scaler/scheduler state before proceeding to another attempt.
     """
     phases = phases or Phases()
     with phases.range("zero_grad"):
         optimizer.zero_grad(set_to_none=True)
     result = accumulate_gradients(model, batches, device=device, precision=config.precision,
-                                  scaler=scaler, phases=phases)
+                                  scaler=scaler, phases=phases, distributed=distributed)
     with phases.range("optimizer"):
         with phases.range("unscale_clip"):
             scaler.unscale_(optimizer)
@@ -317,6 +337,8 @@ def optimizer_attempt(model, optimizer, scaler, scheduler, batches, config, devi
         skipped = scale < previous_scale
         if not skipped:
             scheduler.step()
+        if distributed is not None:
+            distributed.check_update(skipped, scale, scheduler.completed_updates)
     return dict(result, skipped=skipped, learning_rate=lr, scaler_before=previous_scale,
                 scaler_after=scale, nonfinite_gradients=skipped)
 
@@ -332,13 +354,15 @@ def data_signature(metadata):
     return {key: metadata[key] for key in keys if key in metadata}
 
 
-def environment(device):
+def environment(device, *, source_exclude=()):
     """Return software versions, source identity, precision controls, and device
     details for interpreting measurements. Include CUDA GPU properties and attempt
     to read the driver version; an unavailable driver query yields None. Report the
     optional Triton distribution without importing it or requiring its presence.
     Express the legacy PyTorch 2.6 TF32 switch using the same precision label as
     newer releases so reports describe the applied math policy consistently.
+    Optional source_exclude paths omit generated benchmark outputs from Git
+    status/content identity, including custom nonignored destinations.
     """
     result = {
         "python": platform.python_version(), "platform": platform.platform(),
@@ -351,7 +375,7 @@ def environment(device):
             if hasattr(torch.backends.cuda.matmul, "fp32_precision") else
             "tf32" if torch.backends.cuda.matmul.allow_tf32 else "ieee"),
         "torch_threads": torch.get_num_threads(),
-        "source": source_identity(),
+        "source": source_identity(exclude_paths=source_exclude),
     }
     try:
         result["packages"]["triton"] = importlib.metadata.version("triton")

@@ -7,6 +7,14 @@ experiments/fused-cross-entropy.json` measures complete optimiser updates.
 Training measurement tools are documented in
 [the measurement guide](../docs/measurements.md):
 
+For one-versus-two-GPU comparisons on Linux/WSL2, use
+`python scripts/benchmark_gpu_scaling.py --output-dir runs/gpu-scaling`.
+It keeps the global batch fixed and launches both configurations automatically.
+Add `--dry-run` for configuration-only inspection on any platform. See the
+[root README](../README.md#compare-one-and-two-gpus) for a complete command and
+[scaling metrics](../docs/measurements.md#one-versus-two-gpu-scaling) for timing,
+validation and report eligibility.
+
 Use `run_experiments.py --plan experiments/implementations.json --dry-run` to
 inspect the sequential implementation suite. The [root README](../README.md#switch-implementations-and-compare-them)
 documents execution switches, running the suite, reports and resume.

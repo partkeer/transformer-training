@@ -12,7 +12,13 @@ FALLBACK = "Select --loss-backend pytorch to use the reference implementation."
 
 
 def model_loss_backend(model):
-    """Return the model's configured loss backend, defaulting plain modules to PyTorch."""
+    """Read the configured loss through a DDP wrapper; plain modules use PyTorch.
+
+    DDP does not forward arbitrary configuration attributes from its module.
+    Unwrapping explicitly prevents an opted-in Triton loss from silently changing.
+    """
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model = model.module
     return getattr(getattr(model, "implementation", None), "loss_backend", "pytorch")
 
 
